@@ -1,6 +1,4 @@
-# RetinaNet Fine-tuning Project
-
-This project provides tools for fine-tuning a RetinaNet model on custom object detection datasets.
+# Tick-detection via fine-tuned RetinaNet Model
 
 ## Setup
 
@@ -36,14 +34,18 @@ pip install -r requirements.txt
 
 ## Usage
 
-1. Train the model:
+1. data content is being stored elsewhere (images + annotations); they are needed
+
+2. Train the model:
 ```bash
 python src/train.py
 ```
 
-2. Monitor training:
+3. Monitor training:
    - Training metrics are logged to the console
    - Visualizations are saved in the `outputs` directory
+
+4. Evalate model
 
 ## Model Details
 
