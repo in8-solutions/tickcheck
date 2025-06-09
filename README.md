@@ -21,15 +21,18 @@ pip install -r requirements.txt
 ```
 .
 ├── data/
-│   ├── images/          # Your training images
-│   └── annotations.json # COCO format annotations
+│   ├── images/                  # Your training images
+│   └── annotations.json         # COCO format annotations
 ├── src/
-│   ├── model.py        # RetinaNet model definition
-│   ├── dataset.py      # Dataset handling
-│   ├── train.py        # Training script
-│   └── utils.py        # Utility functions
-├── config.yaml         # Configuration file
-└── requirements.txt    # Python dependencies
+│   ├── model.py                # RetinaNet model definition
+│   ├── dataset.py              # Dataset handling and preprocessing
+│   ├── train.py                # Training script
+│   ├── utils.py                # Utility functions
+│   ├── inference.py            # Model inference and prediction
+│   ├── evaluate_model.py       # Model evaluation and metrics
+│   └── visualize_annotations.py # Annotation visualization tools
+├── config.yaml                 # Configuration file
+└── requirements.txt            # Python dependencies
 ```
 
 ## Usage

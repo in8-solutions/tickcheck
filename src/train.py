@@ -190,9 +190,9 @@ def main():
         transforms=train_transform
     )
     
-    # Create subset with first 3000 images
-    dataset = Subset(full_dataset, range(3000))
-    print(f"Using first 3000 images out of {len(full_dataset)} total images")
+    # Create subset with first 5000 images
+    dataset = Subset(full_dataset, range(5000))
+    print(f"Using first 5000 images out of {len(full_dataset)} total images")
     
     # Split dataset
     val_size = int(len(dataset) * config['data']['val_split'])
