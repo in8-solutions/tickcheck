@@ -1,0 +1,53 @@
+model:
+  num_classes: 1  # Update this based on your number of object classes
+  backbone: "resnet50"
+  pretrained: true
+  freeze_backbone: true  # Freeze backbone for faster training
+  device: "cuda"  # Will fall back to CPU if CUDA is not available
+
+training:
+  batch_size: 16
+  num_epochs: 10
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  momentum: 0.9
+  lr_scheduler: "cosine"
+  warmup_epochs: 2
+  mixed_precision: true
+  num_workers: 6  # Increased from 4 to 6 for faster data loading
+  pin_memory: true
+  prefetch_factor: 3  # Increased from 2 to 3
+  persistent_workers: true
+  cudnn_benchmark: true
+  compile_model: false  # Disabled since we had issues with it
+  deterministic: false
+  allow_tf32: true
+  debug_cuda: false
+  max_autotune: false
+  # New optimizations
+  channels_last: true  # Use channels last memory format
+  grad_checkpointing: false  # Keep false since our model isn't that large
+
+data:
+  train_path: "data/images"
+  train_annotations: "data/annotations.json"
+  val_split: 0.2
+  input_size: [600, 600]  # Reduced from 800x800 to manage memory
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  # New optimizations
+  pin_memory_device: "cuda"  # Pin memory directly to CUDA device
+
+augmentation:
+  horizontal_flip: true
+  vertical_flip: true
+  rotate: 45
+  brightness_contrast: true
+
+classes:
+  # Update with your class names
+  0: "tick"  # Replace with your object name
+
+paths:
+  checkpoint_dir: "checkpoints"
+  output_dir: "outputs" 
