@@ -1,3 +1,20 @@
+"""
+Inference script for tick detection model.
+
+This module handles model inference and result visualization. It provides
+functionality to:
+- Load trained models
+- Process images for inference
+- Run detection
+- Visualize and save results
+
+Key Features:
+- Support for various image formats
+- Configurable confidence thresholds
+- Result visualization with bounding boxes
+- Batch processing of test images
+"""
+
 import os
 import torch
 from PIL import Image
@@ -6,14 +23,37 @@ from utils import load_config, visualize_prediction
 from model import create_model
 
 def load_trained_model(checkpoint_path, config):
-    """Load a trained model from checkpoint."""
+    """Load a trained model from checkpoint.
+    
+    Args:
+        checkpoint_path (str): Path to the model checkpoint file
+        config (dict): Model configuration dictionary
+    
+    Returns:
+        nn.Module: Loaded model with trained weights
+    """
     model = create_model(config)
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     model.load_state_dict(checkpoint['model_state_dict'])
     return model
 
 def prepare_image(image_path, config):
-    """Prepare image for inference."""
+    """Prepare an image for model inference.
+    
+    This function:
+    1. Loads and converts image to RGB
+    2. Applies necessary transformations:
+       - Resizing to model input size
+       - Conversion to tensor
+       - Normalization
+    
+    Args:
+        image_path (str): Path to the input image
+        config (dict): Configuration containing preprocessing parameters
+    
+    Returns:
+        torch.Tensor: Preprocessed image tensor ready for inference
+    """
     # Load and convert to RGB
     image = Image.open(image_path).convert('RGB')
     
@@ -33,7 +73,22 @@ def prepare_image(image_path, config):
     return image_tensor
 
 def run_inference(model, image_tensor, confidence_threshold=0.5):
-    """Run inference on a single image."""
+    """Run object detection inference on a single image.
+    
+    This function:
+    1. Moves data to appropriate device
+    2. Runs model inference
+    3. Filters predictions by confidence threshold
+    4. Returns detection results
+    
+    Args:
+        model (nn.Module): The trained detection model
+        image_tensor (torch.Tensor): Preprocessed input image
+        confidence_threshold (float): Minimum confidence for detections
+    
+    Returns:
+        tuple: (boxes, scores, labels) for detections above threshold
+    """
     device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
     model = model.to(device)
     model.eval()
@@ -55,6 +110,20 @@ def run_inference(model, image_tensor, confidence_threshold=0.5):
     return filtered_boxes, filtered_scores, filtered_labels
 
 def main():
+    """Main inference function.
+    
+    This function orchestrates the inference process:
+    1. Loads model configuration and weights
+    2. Processes all images in test directory
+    3. Runs inference on each image
+    4. Visualizes and saves results
+    
+    The function handles:
+    - Multiple image formats (PNG, JPG, JPEG)
+    - Proper directory creation
+    - Progress reporting
+    - Result visualization and saving
+    """
     # Load configuration
     config = load_config('config.yaml')
     

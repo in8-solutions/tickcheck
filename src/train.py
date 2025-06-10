@@ -1,3 +1,23 @@
+"""
+Training script for tick detection model.
+
+This module implements the training loop and validation process for the tick detection
+model. It handles:
+- Data loading and batching
+- Training and validation loops
+- Mixed precision training
+- Checkpointing
+- Training curve visualization
+- Memory optimization
+
+Key Features:
+- Automatic mixed precision (AMP) training
+- GPU memory optimization
+- Training progress visualization
+- Configurable training parameters
+- Support for quick testing mode
+"""
+
 import os
 import math
 import torch
@@ -17,6 +37,11 @@ from dataset import DetectionDataset, get_transform
 from model import create_model
 
 def print_gpu_memory():
+    """Print current GPU memory usage if significant memory is being used.
+    
+    This function helps monitor GPU memory consumption during training,
+    printing both allocated and cached memory in megabytes.
+    """
     if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated() / 1024**2
         cached = torch.cuda.memory_reserved() / 1024**2
@@ -24,6 +49,28 @@ def print_gpu_memory():
             print(f"GPU memory: {allocated:.0f}MB allocated, {cached:.0f}MB cached")
 
 def train_one_epoch(model, optimizer, data_loader, device, scaler=None):
+    """Train the model for one epoch with performance monitoring.
+    
+    This function:
+    1. Handles the training loop for one epoch
+    2. Implements mixed precision training when available
+    3. Monitors and reports:
+       - Loss values
+       - Batch processing time
+       - Data loading time
+       - Training speed (iterations/second)
+    4. Implements memory optimization techniques
+    
+    Args:
+        model (nn.Module): The model to train
+        optimizer (torch.optim.Optimizer): The optimizer
+        data_loader (DataLoader): Training data loader
+        device (torch.device): Device to train on
+        scaler (GradScaler, optional): Gradient scaler for mixed precision
+    
+    Returns:
+        dict: Metrics including loss, timing, and throughput information
+    """
     model.train()
     loss_hist = AverageMeter()
     batch_time = AverageMeter()
@@ -127,6 +174,22 @@ def train_one_epoch(model, optimizer, data_loader, device, scaler=None):
     return metrics
 
 def validate(model, data_loader, device):
+    """Validate the model on the validation dataset.
+    
+    This function:
+    1. Computes model loss on validation data
+    2. Uses no_grad for memory efficiency
+    3. Implements mixed precision inference
+    4. Handles memory cleanup after validation
+    
+    Args:
+        model (nn.Module): The model to validate
+        data_loader (DataLoader): Validation data loader
+        device (torch.device): Device to validate on
+    
+    Returns:
+        float: Average validation loss
+    """
     """Validate the model by computing losses on the validation set."""
     model.train()  # We need training mode to get losses
     loss_hist = AverageMeter()
@@ -149,6 +212,20 @@ def validate(model, data_loader, device):
     return loss_hist.avg
 
 def plot_training_curves(history, output_dir):
+    """Plot and save training progress visualization.
+    
+    Creates and saves plots showing:
+    1. Training and validation loss over time
+    2. Learning rate schedule
+    3. Saves raw data for future analysis
+    
+    Args:
+        history (dict): Training history containing:
+            - train_loss: List of training losses
+            - val_loss: List of validation losses
+            - learning_rates: List of learning rates
+        output_dir (str): Directory to save plots and data
+    """
     """Plot and save training curves."""
     plt.figure(figsize=(12, 8))
     plt.subplot(2, 1, 1)
@@ -190,6 +267,18 @@ def plot_training_curves(history, output_dir):
         }, f, indent=4)
 
 def main():
+    """Main training function.
+    
+    This function orchestrates the training process:
+    1. Loads configuration and sets up environment
+    2. Prepares data loaders and model
+    3. Implements training loop with:
+       - Regular validation
+       - Model checkpointing
+       - Progress visualization
+       - Memory optimization
+    4. Supports quick test mode for rapid iteration
+    """
     # Check for quick test mode
     QUICK_TEST = os.environ.get('QUICK_TEST', '').lower() == 'true'
     

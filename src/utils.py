@@ -1,3 +1,24 @@
+"""
+Utility functions for tick detection model.
+
+This module provides various utility functions used throughout the project for:
+- Configuration management
+- Directory handling
+- Data loading
+- Visualization
+- Checkpoint management
+- Metric tracking
+- Training curve plotting
+
+Key Features:
+- YAML configuration loading
+- Directory structure management
+- Custom data collation
+- Detection visualization
+- Model checkpointing
+- Training metrics tracking
+"""
+
 import yaml
 import torch
 import numpy as np
@@ -9,18 +30,44 @@ import os
 import json
 
 def load_config(config_path):
-    """Load configuration from YAML file."""
+    """Load configuration from YAML file.
+    
+    Args:
+        config_path (str): Path to YAML configuration file
+    
+    Returns:
+        dict: Loaded configuration dictionary
+    """
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
 def create_directories(config):
-    """Create necessary directories for training."""
+    """Create necessary directories for training outputs.
+    
+    Creates directories for:
+    - Model checkpoints
+    - Training outputs
+    - Training curve visualizations
+    
+    Args:
+        config (dict): Configuration dictionary containing path information
+    """
     os.makedirs(config['training']['checkpoint_dir'], exist_ok=True)
     os.makedirs(config['training']['output_dir'], exist_ok=True)
     os.makedirs(os.path.join(config['training']['output_dir'], 'training_curves'), exist_ok=True)
 
 def collate_fn(batch):
-    """Custom collate function for data loader."""
+    """Custom collate function for object detection data loading.
+    
+    This function handles batching of images and targets for the data loader,
+    ensuring proper stacking of images while keeping target dictionaries separate.
+    
+    Args:
+        batch (list): List of (image, target) tuples
+    
+    Returns:
+        tuple: (stacked_images, list_of_targets)
+    """
     images = []
     targets = []
     for image, target in batch:
@@ -29,7 +76,25 @@ def collate_fn(batch):
     return torch.stack(images), targets
 
 def visualize_prediction(image, boxes, scores, labels, class_names, threshold=0.5):
-    """Visualize detection results on an image."""
+    """Visualize object detection results on an image.
+    
+    This function:
+    1. Denormalizes the image
+    2. Draws bounding boxes around detections
+    3. Adds class labels and confidence scores
+    4. Handles confidence thresholding
+    
+    Args:
+        image (torch.Tensor): The input image tensor
+        boxes (torch.Tensor): Detected bounding boxes
+        scores (torch.Tensor): Detection confidence scores
+        labels (torch.Tensor): Class labels for each detection
+        class_names (list): List of class names for label mapping
+        threshold (float): Confidence threshold for showing detections
+    
+    Returns:
+        matplotlib.figure.Figure: Figure with visualized detections
+    """
     image = image.permute(1, 2, 0).cpu().numpy()
     image = (image * np.array([0.229, 0.224, 0.225]) + np.array([0.485, 0.456, 0.406]))
     image = np.clip(image, 0, 1)
@@ -62,7 +127,24 @@ def visualize_prediction(image, boxes, scores, labels, class_names, threshold=0.
     return plt.gcf()
 
 def save_checkpoint(model, optimizer, epoch, config, filename):
-    """Save model checkpoint."""
+    """Save model checkpoint with training state.
+    
+    Saves:
+    - Model state dict
+    - Optimizer state dict
+    - Current epoch
+    - Configuration
+    - Training metrics
+    - Learning rate
+    - Training history
+    
+    Args:
+        model (nn.Module): The model to save
+        optimizer (torch.optim.Optimizer): The optimizer
+        epoch (int): Current epoch number
+        config (dict): Configuration dictionary
+        filename (str): Path to save checkpoint
+    """
     checkpoint = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
@@ -76,14 +158,31 @@ def save_checkpoint(model, optimizer, epoch, config, filename):
     torch.save(checkpoint, filename)
 
 def load_checkpoint(model, optimizer, filename):
-    """Load model checkpoint."""
+    """Load model checkpoint and restore training state.
+    
+    Args:
+        model (nn.Module): The model to load weights into
+        optimizer (torch.optim.Optimizer): The optimizer to restore state
+        filename (str): Path to checkpoint file
+    
+    Returns:
+        tuple: (epoch_number, config_dict)
+    """
     checkpoint = torch.load(filename)
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     return checkpoint['epoch'], checkpoint['config']
 
 class AverageMeter:
-    """Computes and stores the average and current value."""
+    """Computes and stores the average and current value of metrics.
+    
+    This class provides:
+    - Running average calculation
+    - Current value tracking
+    - Simple update mechanism
+    
+    Useful for tracking metrics like loss values during training.
+    """
     def __init__(self):
         self.reset()
 
@@ -100,7 +199,17 @@ class AverageMeter:
         self.avg = self.sum / self.count 
 
 def plot_training_curves(history, output_dir):
-    """Plot and save training curves."""
+    """Plot and save training progress curves.
+    
+    Creates visualization of:
+    1. Training and validation loss curves
+    2. Learning rate schedule
+    3. Saves both plot and raw data
+    
+    Args:
+        history (dict): Training history containing metrics
+        output_dir (str): Directory to save outputs
+    """
     plt.figure(figsize=(12, 8))
     plt.subplot(2, 1, 1)
     plt.plot(history['train_loss'], label='Training Loss')

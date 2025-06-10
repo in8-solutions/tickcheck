@@ -1,3 +1,17 @@
+"""
+Dataset handling for tick detection model.
+
+This module implements a PyTorch Dataset for object detection using the COCO format.
+It handles loading images and their corresponding annotations, applying transformations,
+and preparing the data for training and validation.
+
+Key Features:
+- Supports COCO format annotations
+- Handles bounding box normalization
+- Provides configurable data augmentation
+- Supports both training and inference transformations
+"""
+
 import os
 import json
 import torch
@@ -8,6 +22,20 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 class DetectionDataset(Dataset):
+    """A PyTorch Dataset for object detection tasks using COCO format annotations.
+    
+    This dataset class handles:
+    1. Loading images and annotations from a COCO format dataset
+    2. Converting bounding box formats
+    3. Applying transformations and augmentations
+    4. Preparing data in the format expected by the model
+    
+    Args:
+        image_dir (str): Directory containing the images
+        annotation_file (str): Path to COCO format annotation JSON file
+        transforms (albumentations.Compose, optional): Transformations to apply
+        train (bool): Whether this is a training dataset (affects augmentations)
+    """
     def __init__(self, image_dir, annotation_file, transforms=None, train=True):
         self.image_dir = image_dir
         self.transforms = transforms
@@ -131,12 +159,29 @@ class DetectionDataset(Dataset):
         return image, target
 
 def get_transform(config, train=True, inference_only=False):
-    """Create transformation pipeline.
+    """Create transformation pipeline for images and bounding boxes.
+    
+    This function creates an Albumentations transformation pipeline that can:
+    1. Resize images to a consistent size
+    2. Apply data augmentation during training
+    3. Normalize pixel values
+    4. Convert images to PyTorch tensors
+    
+    The augmentations are controlled by the config file and include:
+    - Horizontal and vertical flips
+    - Rotation
+    - Scale changes
+    - Brightness/contrast adjustments
+    - Gaussian blur
+    - Noise addition
     
     Args:
-        config: Configuration dictionary
-        train: Whether to include training augmentations
-        inference_only: If True, don't expect bounding boxes or labels
+        config (dict): Configuration dictionary containing transform settings
+        train (bool): Whether to include training augmentations
+        inference_only (bool): If True, create simpler transform for inference
+        
+    Returns:
+        albumentations.Compose: Transformation pipeline
     """
     if inference_only:
         # Simple transform for inference without bbox handling

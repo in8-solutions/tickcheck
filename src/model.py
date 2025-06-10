@@ -1,3 +1,17 @@
+"""
+RetinaNet model implementation for tick detection.
+
+This module implements a custom RetinaNet model based on PyTorch's implementation.
+The model uses a ResNet50-FPN backbone and is designed for efficient single-stage
+object detection with balanced handling of class imbalance through Focal Loss.
+
+Key Features:
+- ResNet50 backbone with Feature Pyramid Network (FPN)
+- Custom anchor generation
+- Focal Loss for handling class imbalance
+- Support for transfer learning from ImageNet weights
+"""
+
 import math
 import torch
 import torch.nn as nn
@@ -8,6 +22,22 @@ from torchvision.models.detection.anchor_utils import AnchorGenerator
 from torchvision.models.resnet import ResNet50_Weights
 
 class CustomRetinaNet(nn.Module):
+    """Custom RetinaNet implementation for tick detection.
+    
+    This class implements a RetinaNet model with:
+    1. ResNet50-FPN backbone (optionally pretrained on ImageNet)
+    2. Custom anchor generation with multiple scales and aspect ratios
+    3. Focal Loss for handling class imbalance
+    4. Configurable backbone freezing for transfer learning
+    
+    The model follows the architecture described in the RetinaNet paper:
+    "Focal Loss for Dense Object Detection" (https://arxiv.org/abs/1708.02002)
+    
+    Args:
+        num_classes (int): Number of object classes to detect
+        pretrained (bool): Whether to use ImageNet pretrained backbone
+        freeze_backbone (bool): Whether to freeze the backbone for transfer learning
+    """
     def __init__(self, num_classes, pretrained=True, freeze_backbone=False):
         super().__init__()
         
@@ -71,7 +101,24 @@ class CustomRetinaNet(nn.Module):
             raise e
 
 def create_model(config):
-    """Create and configure the RetinaNet model."""
+    """Create and configure the RetinaNet model based on config settings.
+    
+    This function:
+    1. Creates a CustomRetinaNet instance with specified parameters
+    2. Moves the model to the appropriate device (GPU/CPU)
+    3. Prints device information for debugging
+    
+    Args:
+        config (dict): Configuration dictionary containing model settings
+            Required keys:
+            - model.num_classes: Number of object classes
+            - model.pretrained: Whether to use pretrained backbone
+            - model.freeze_backbone: Whether to freeze backbone
+            - model.device: Device to place model on
+    
+    Returns:
+        CustomRetinaNet: Configured model instance on specified device
+    """
     model = CustomRetinaNet(
         num_classes=config['model']['num_classes'],
         pretrained=config['model']['pretrained'],
