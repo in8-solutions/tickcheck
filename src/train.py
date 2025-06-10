@@ -364,6 +364,9 @@ def main():
             print(f'Val Loss: {val_loss:.4f}')
             print(f'Learning Rate: {current_lr:.6f}')
             
+            # Plot and save training curves after each epoch
+            plot_training_curves(history, config['training']['output_dir'])
+            
             # Save checkpoint if validation loss improved
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
