@@ -152,18 +152,34 @@ def get_transform(config, train=True, inference_only=False):
             ToTensorV2()
         ])
     elif train:
+        aug_config = config['augmentation']['train']
         transform = A.Compose([
             A.Resize(
                 height=config['data']['input_size'][0],
                 width=config['data']['input_size'][1]
             ),
-            A.HorizontalFlip(p=0.5 if config['augmentation']['horizontal_flip'] else 0),
-            A.VerticalFlip(p=0.5 if config['augmentation']['vertical_flip'] else 0),
+            A.HorizontalFlip(p=0.5 if aug_config['horizontal_flip'] else 0),
+            A.VerticalFlip(p=0.5 if aug_config['vertical_flip'] else 0),
             A.Rotate(
-                limit=config['augmentation']['rotate'],
-                p=0.5
-            ) if config['augmentation']['rotate'] else A.NoOp(),
-            A.RandomBrightnessContrast(p=0.5 if config['augmentation']['brightness_contrast'] else 0),
+                limit=aug_config['rotate']['limit'] if aug_config['rotate']['enabled'] else 0,
+                p=0.5 if aug_config['rotate']['enabled'] else 0
+            ),
+            A.RandomScale(
+                scale_limit=(aug_config['scale']['min'] - 1.0, aug_config['scale']['max'] - 1.0),
+                p=0.5 if aug_config['scale']['enabled'] else 0
+            ),
+            A.RandomBrightnessContrast(
+                brightness_limit=aug_config['brightness']['limit'],
+                contrast_limit=aug_config['contrast']['limit'],
+                p=0.5 if aug_config['brightness']['enabled'] or aug_config['contrast']['enabled'] else 0
+            ),
+            A.GaussianBlur(
+                blur_limit=aug_config['blur']['limit'] if aug_config['blur']['enabled'] else 0,
+                p=0.5 if aug_config['blur']['enabled'] else 0
+            ),
+            A.GaussNoise(
+                p=0.5 if aug_config['noise']['enabled'] else 0
+            ),
             A.Normalize(
                 mean=config['data']['mean'],
                 std=config['data']['std']
@@ -171,6 +187,7 @@ def get_transform(config, train=True, inference_only=False):
             ToTensorV2()
         ], bbox_params=A.BboxParams(format='albumentations', label_fields=['labels']))
     else:
+        # Validation transform - just resize and normalize
         transform = A.Compose([
             A.Resize(
                 height=config['data']['input_size'][0],

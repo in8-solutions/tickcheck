@@ -7,6 +7,10 @@ from tqdm import tqdm
 from torch.amp import autocast, GradScaler
 import torch._dynamo
 import json
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+import sys
 
 from utils import load_config, create_directories, collate_fn, AverageMeter, save_checkpoint
 from dataset import DetectionDataset, get_transform
@@ -144,158 +148,266 @@ def validate(model, data_loader, device):
     
     return loss_hist.avg
 
+def plot_training_curves(history, output_dir):
+    """Plot and save training curves."""
+    plt.figure(figsize=(12, 8))
+    plt.subplot(2, 1, 1)
+    plt.plot(history['train_loss'], label='Training Loss')
+    plt.plot(history['val_loss'], label='Validation Loss')
+    plt.title('Model Loss Over Time')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True)
+
+    # Plot learning rate
+    plt.subplot(2, 1, 2)
+    plt.plot(history['learning_rates'], label='Learning Rate')
+    plt.title('Learning Rate Over Time')
+    plt.xlabel('Epoch')
+    plt.ylabel('Learning Rate')
+    plt.yscale('log')
+    plt.grid(True)
+    plt.legend()
+
+    plt.tight_layout()
+    
+    # Save the plot
+    curves_dir = Path(output_dir) / 'training_curves'
+    curves_dir.mkdir(exist_ok=True)
+    plt.savefig(curves_dir / 'training_curves.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Save raw data for future reference
+    with open(curves_dir / 'training_history.json', 'w') as f:
+        json.dump({
+            'train_loss': history['train_loss'],
+            'val_loss': history['val_loss'],
+            'learning_rates': history['learning_rates'],
+            'epochs': len(history['train_loss']),
+            'best_val_loss': min(history['val_loss']),
+            'best_epoch': history['val_loss'].index(min(history['val_loss'])) + 1
+        }, f, indent=4)
+
 def main():
-    # Load configuration
-    config = load_config('config.yaml')
+    # Check for quick test mode
+    QUICK_TEST = os.environ.get('QUICK_TEST', '').lower() == 'true'
     
-    # Create necessary directories
-    create_directories(config)
-    
-    # Training history
-    history = {
-        'train_loss': [],
-        'val_loss': [],
-        'best_val_loss': float('inf'),
-        'epochs_without_improvement': 0
-    }
-    
-    # Set device and optimize CUDA settings
-    device = torch.device(config['model']['device'] if torch.cuda.is_available() else 'cpu')
-    if device.type == 'cuda':
-        print(f'Using device: {device}')
-        print(f'GPU: {torch.cuda.get_device_name(0)}')
+    try:
+        # Load configuration
+        config = load_config('config.yaml')
         
-        # CUDA optimizations
-        if config['training'].get('allow_tf32', False):
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
+        if QUICK_TEST:
+            print("Running in QUICK TEST mode!")
+            print("Using 10 images, 5 training iterations, 2 validation iterations")
         
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
-        torch.cuda.set_per_process_memory_fraction(0.95)
+        # Create necessary directories
+        create_directories(config)
         
-        # Set memory allocator settings
-        torch.cuda.empty_cache()
-        if hasattr(torch.cuda, 'memory_stats'):
-            torch.cuda.memory_stats(device=device)
-    
-    # Create transforms and datasets
-    train_transform = get_transform(config, train=True)
-    val_transform = get_transform(config, train=False)
-    
-    # Create dataset
-    full_dataset = DetectionDataset(
-        config['data']['train_path'],
-        config['data']['train_annotations'],
-        transforms=train_transform
-    )
-    
-    # Create subset with first 5000 images
-    dataset = Subset(full_dataset, range(5000))
-    print(f"Using first 5000 images out of {len(full_dataset)} total images")
-    
-    # Split dataset
-    val_size = int(len(dataset) * config['data']['val_split'])
-    train_size = len(dataset) - val_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-    
-    # Update val_dataset transform
-    val_dataset.dataset.dataset.transforms = val_transform  # Note: double dataset due to Subset + random_split
-    
-    # DataLoader settings
-    loader_kwargs = {
-        'batch_size': config['training']['batch_size'],
-        'num_workers': config['training']['num_workers'],
-        'collate_fn': collate_fn,
-        'pin_memory': config['training']['pin_memory'],
-        'prefetch_factor': config['training']['prefetch_factor'],
-        'persistent_workers': config['training']['persistent_workers']
-    }
-    
-    # Create data loaders
-    train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
-    val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
-    
-    # Create model
-    model = create_model(config)
-    
-    # Convert model to channels last format if configured
-    if config['training'].get('channels_last', False):
-        model = model.to(memory_format=torch.channels_last)
-    
-    # Move model to device
-    model = model.to(device)
-    
-    # Create optimizer
-    params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(
-        params,
-        lr=config['training']['learning_rate'],
-        weight_decay=config['training']['weight_decay']
-    )
-    
-    # Initialize gradient scaler for mixed precision training
-    if config['training'].get('mixed_precision', False) and device.type == 'cuda':
-        scaler = GradScaler()
-    else:
-        scaler = None
-    
-    # Training loop
-    best_val_loss = float('inf')
-    patience = 3  # Number of epochs to wait for improvement before early stopping
-    min_delta = 0.01
-    
-    for epoch in range(config['training']['num_epochs']):
-        print(f'\nEpoch {epoch + 1}/{config["training"]["num_epochs"]}')
+        # Set CUDA memory management configuration
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
         
-        # Train for one epoch
-        train_metrics = train_one_epoch(model, optimizer, train_loader, device, scaler)
+        # Training history
+        history = {
+            'train_loss': [],
+            'val_loss': [],
+            'learning_rates': [],
+            'best_val_loss': float('inf'),
+            'epochs_without_improvement': 0
+        }
         
-        # Validate
-        val_loss = validate(model, val_loader, device)
+        # Set device and optimize CUDA settings
+        device = torch.device(config['model']['device'] if torch.cuda.is_available() else 'cpu')
+        if device.type == 'cuda':
+            print(f'Using device: {device}')
+            print(f'GPU: {torch.cuda.get_device_name(0)}')
+            
+            # CUDA optimizations
+            if config['training'].get('allow_tf32', False):
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+            
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+            torch.cuda.set_per_process_memory_fraction(0.95)
+            
+            # Set memory allocator settings
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, 'memory_stats'):
+                torch.cuda.memory_stats(device=device)
         
-        # Update history
-        history['train_loss'].append(train_metrics['loss'])
-        history['val_loss'].append(val_loss)
+        # Create transforms and datasets
+        train_transform = get_transform(config, train=True)
+        val_transform = get_transform(config, train=False)
         
-        print(f'Train Loss: {train_metrics["loss"]:.4f}, Val Loss: {val_loss:.4f}')
+        # Create dataset
+        full_dataset = DetectionDataset(
+            config['data']['train_path'],
+            config['data']['train_annotations'],
+            transforms=train_transform
+        )
         
-        # Save checkpoint if validation loss improved
-        if val_loss < best_val_loss - min_delta:
-            print(f"Validation loss improved from {best_val_loss:.4f} to {val_loss:.4f}")
-            best_val_loss = val_loss
-            history['epochs_without_improvement'] = 0
-            save_checkpoint(
-                model,
-                optimizer,
-                epoch,
-                config,
-                os.path.join(config['paths']['checkpoint_dir'], 'best_model.pth')
-            )
-            # Also save a numbered version for history
-            save_checkpoint(
-                model,
-                optimizer,
-                epoch,
-                config,
-                os.path.join(config['paths']['checkpoint_dir'], f'model_epoch_{epoch+1}.pth')
-            )
+        # Create subset with first N images
+        num_images = 10 if QUICK_TEST else 5000
+        dataset = Subset(full_dataset, range(num_images))
+        print(f"Using first {num_images} images out of {len(full_dataset)} total images")
+        
+        # Split dataset
+        val_size = int(len(dataset) * config['data']['val_split'])
+        train_size = len(dataset) - val_size
+        train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+        
+        # Update val_dataset transform
+        val_dataset.dataset.dataset.transforms = val_transform  # Note: double dataset due to Subset + random_split
+        
+        # DataLoader settings
+        loader_kwargs = {
+            'batch_size': config['training']['batch_size'],
+            'num_workers': config['training']['num_workers'],
+            'collate_fn': collate_fn,
+            'pin_memory': config['training']['pin_memory'],
+            'prefetch_factor': config['training']['prefetch_factor'],
+            'persistent_workers': config['training']['persistent_workers']
+        }
+        
+        # Create data loaders
+        train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
+        val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
+        
+        # Create model
+        model = create_model(config)
+        
+        # Convert model to channels last format if configured
+        if config['training'].get('channels_last', False):
+            model = model.to(memory_format=torch.channels_last)
+        
+        # Move model to device
+        model = model.to(device)
+        
+        # Create optimizer
+        params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(
+            params,
+            lr=config['training']['learning_rate'],
+            weight_decay=config['training']['weight_decay']
+        )
+        
+        # Initialize gradient scaler for mixed precision training
+        if config['training'].get('mixed_precision', False) and device.type == 'cuda':
+            scaler = GradScaler()
         else:
-            history['epochs_without_improvement'] += 1
-            print(f"Validation loss did not improve. Best: {best_val_loss:.4f}")
-            if history['epochs_without_improvement'] >= patience:
-                print(f"\nEarly stopping triggered! No improvement for {patience} epochs.")
+            scaler = None
+        
+        # Training loop
+        best_val_loss = float('inf')
+        min_epochs = 1 if QUICK_TEST else config['training'].get('min_epochs', 20)
+        patience = 1 if QUICK_TEST else config['training'].get('patience', 5)
+        num_epochs = 1 if QUICK_TEST else config['training']['num_epochs']
+        
+        for epoch in range(num_epochs):
+            print(f'\nEpoch {epoch + 1}/{num_epochs}')
+            
+            # Train one epoch
+            if QUICK_TEST:
+                # Only run 5 iterations for quick test
+                losses = None
+                for i, (images, targets) in enumerate(train_loader):
+                    if i >= 5:  # Stop after 5 iterations
+                        break
+                    images = [image.to(device) for image in images]
+                    targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+                    loss_dict = model(images, targets)
+                    losses = sum(loss for loss in loss_dict.values())
+                    optimizer.zero_grad()
+                    losses.backward()
+                    optimizer.step()
+                    print(f'Quick test iteration {i+1}/5, loss: {losses.item():.4f}')
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                if losses is None:
+                    raise RuntimeError("No training iterations completed")
+                train_metrics = {'loss': losses.item()}
+            else:
+                train_metrics = train_one_epoch(model, optimizer, train_loader, device, scaler)
+            
+            history['train_loss'].append(train_metrics['loss'])
+            
+            # Validate
+            if QUICK_TEST:
+                # Only run 2 iterations for validation in quick test
+                val_losses = []
+                for i, (images, targets) in enumerate(val_loader):
+                    if i >= 2:  # Stop after 2 iterations
+                        break
+                    images = [image.to(device) for image in images]
+                    targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+                    with torch.no_grad():
+                        loss_dict = model(images, targets)
+                        losses = sum(loss for loss in loss_dict.values())
+                        val_losses.append(losses.item())
+                    print(f'Quick test validation iteration {i+1}/2, loss: {losses.item():.4f}')
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                if not val_losses:
+                    raise RuntimeError("No validation iterations completed")
+                val_loss = sum(val_losses) / len(val_losses)
+            else:
+                val_loss = validate(model, val_loader, device)
+            
+            history['val_loss'].append(val_loss)
+            
+            # Store current learning rate
+            current_lr = optimizer.param_groups[0]['lr']
+            history['learning_rates'].append(current_lr)
+            
+            print(f'Train Loss: {train_metrics["loss"]:.4f}')
+            print(f'Val Loss: {val_loss:.4f}')
+            print(f'Learning Rate: {current_lr:.6f}')
+            
+            # Save checkpoint if validation loss improved
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                history['best_val_loss'] = val_loss
+                history['epochs_without_improvement'] = 0
+                save_checkpoint(model, optimizer, epoch + 1, config, os.path.join(config['training']['checkpoint_dir'], 'latest_model.pth'))
+                
+                # Save best model
+                if val_loss < history['best_val_loss']:
+                    history['best_val_loss'] = val_loss
+                    history['epochs_without_improvement'] = 0
+                    save_checkpoint(model, optimizer, epoch + 1, config, os.path.join(config['training']['checkpoint_dir'], 'best_model.pth'))
+            else:
+                history['epochs_without_improvement'] += 1
+            
+            # Early stopping check, but only after minimum epochs
+            if epoch + 1 >= min_epochs and history['epochs_without_improvement'] >= patience:
+                print(f'\nEarly stopping triggered. No improvement for {patience} epochs.')
                 break
         
-        # Save training history
-        history_path = os.path.join(config['paths']['output_dir'], 'training_history.json')
-        with open(history_path, 'w') as f:
-            json.dump({
-                'train_loss': [float(x) for x in history['train_loss']],
-                'val_loss': [float(x) for x in history['val_loss']],
-                'best_val_loss': float(best_val_loss),
-                'epochs_completed': epoch + 1
-            }, f, indent=4)
+        # Plot training curves
+        plot_training_curves(history, config['training']['output_dir'])
+        
+        print('\nTraining completed!')
+        print(f'Best validation loss: {best_val_loss:.4f}')
+        
+    finally:
+        # Cleanup
+        if 'train_loader' in locals():
+            del train_loader
+        if 'val_loader' in locals():
+            del val_loader
+        if 'model' in locals():
+            model.cpu()
+            del model
+        if 'optimizer' in locals():
+            del optimizer
+        torch.cuda.empty_cache()
+        
+        # Force close the workers
+        if torch.multiprocessing.current_process().daemon:
+            os._exit(0)
+        else:
+            sys.exit(0)
 
 if __name__ == '__main__':
     main() 

@@ -189,72 +189,215 @@ class ModelEvaluator:
         
         return image
 
-def evaluate_directory(model_path, input_dir, output_dir, confidence_threshold=0.5):
+def evaluate_directory(model_path, input_dir, output_dir='outputs/evaluation', confidence_threshold=0.5):
     """
     Evaluate model on all images in a directory.
-    
-    This function demonstrates:
-    1. Batch processing of test images
-    2. Organizing evaluation results
-    3. Creating summary statistics
-    4. Saving results for later analysis
-    
-    For student projects, consider:
-    - Adding different test image categories (skin_only/, with_ticks/, etc.)
-    - Tracking false positives in tick-free images
-    - Measuring detection rates on known tick images
-    - Testing with different lighting conditions
+    Expects input_dir to have subdirectories:
+    - with_ticks/    : Images known to contain ticks
+    - without_ticks/ : Images known to be tick-free
     """
     evaluator = ModelEvaluator(model_path, confidence_threshold=confidence_threshold)
     
-    # Create output directory structure
+    # Create output directories
     vis_dir = Path(output_dir) / 'visualizations'
     results_dir = Path(output_dir) / 'results'
-    os.makedirs(vis_dir, exist_ok=True)
-    os.makedirs(results_dir, exist_ok=True)
+    vis_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
     
-    # Process all images
-    results = {}
+    # Initialize results tracking
+    results = {
+        'with_ticks': {},
+        'without_ticks': {},
+        'summary': {
+            'total_images': 0,
+            'total_detections': 0,
+            'true_positives': 0,    # Detections in with_ticks/
+            'false_positives': 0,   # Detections in without_ticks/
+            'false_negatives': 0,   # Images in with_ticks/ with no detections
+            'true_negatives': 0,    # Images in without_ticks/ with no detections
+            'precision': 0.0,
+            'recall': 0.0,
+            'f1_score': 0.0,
+            'confidence_distribution': {
+                '0.9-1.0': 0,
+                '0.8-0.9': 0,
+                '0.7-0.8': 0,
+                '0.6-0.7': 0,
+                '0.5-0.6': 0
+            }
+        }
+    }
+    
     input_dir = Path(input_dir)
     image_extensions = {'.jpg', '.jpeg', '.png', '.bmp'}
     
-    for image_path in input_dir.glob('**/*'):
-        if image_path.suffix.lower() not in image_extensions:
+    # Process images by category
+    for category in ['with_ticks', 'without_ticks']:
+        category_dir = input_dir / category
+        if not category_dir.exists():
+            print(f"Warning: {category_dir} not found!")
             continue
-        
-        print(f"\nProcessing: {image_path}")
-        
-        # Run detection
-        detections = evaluator.process_image(image_path)
-        
-        # Save detailed results as JSON for later analysis
-        result_file = results_dir / f"{image_path.stem}_detections.json"
-        with open(result_file, 'w') as f:
-            json.dump({
-                'boxes': detections['boxes'].tolist(),
-                'scores': detections['scores'].tolist(),
-                'labels': detections['labels'].tolist(),
-                'image_size': detections['image_size']
-            }, f, indent=4)
-        
-        # Create and save visualization
-        vis_file = vis_dir / f"{image_path.stem}_detected.jpg"
-        evaluator.visualize_results(image_path, detections, vis_file)
-        
-        # Store summary metrics
-        results[image_path.name] = {
-            'num_detections': len(detections['boxes']),
-            'max_confidence': float(max(detections['scores'])) if len(detections['scores']) > 0 else 0,
-            'detections_file': str(result_file),
-            'visualization_file': str(vis_file)
-        }
+            
+        for image_path in category_dir.glob('**/*'):
+            if image_path.suffix.lower() not in image_extensions:
+                continue
+            
+            print(f"\nProcessing: {image_path}")
+            results['summary']['total_images'] += 1
+            
+            # Run detection
+            detections = evaluator.process_image(image_path)
+            if detections is None:
+                continue
+                
+            num_detections = len(detections['boxes'])
+            results['summary']['total_detections'] += num_detections
+            
+            # Update confidence distribution
+            for score in detections['scores']:
+                score = float(score)
+                for range_str in results['summary']['confidence_distribution']:
+                    low, high = map(float, range_str.split('-'))
+                    if low <= score < high:
+                        results['summary']['confidence_distribution'][range_str] += 1
+            
+            # Save detailed results as JSON
+            result_file = results_dir / f"{image_path.stem}_detections.json"
+            with open(result_file, 'w') as f:
+                json.dump({
+                    'boxes': detections['boxes'].tolist(),
+                    'scores': detections['scores'].tolist(),
+                    'labels': detections['labels'].tolist(),
+                    'image_size': detections['image_size']
+                }, f, indent=4)
+            
+            # Create and save visualization
+            vis_file = vis_dir / f"{image_path.stem}_detected.jpg"
+            evaluator.visualize_results(image_path, detections, vis_file)
+            
+            # Store results and update metrics
+            results[category][image_path.name] = {
+                'num_detections': num_detections,
+                'scores': [float(s) for s in detections['scores']],
+                'detections_file': str(result_file),
+                'visualization_file': str(vis_file)
+            }
+            
+            # Update true/false positives/negatives
+            if category == 'with_ticks':
+                if num_detections > 0:
+                    results['summary']['true_positives'] += 1
+                else:
+                    results['summary']['false_negatives'] += 1
+            else:  # without_ticks
+                if num_detections > 0:
+                    results['summary']['false_positives'] += 1
+                else:
+                    results['summary']['true_negatives'] += 1
     
-    # Save evaluation summary
-    summary_file = Path(output_dir) / 'evaluation_summary.json'
+    # Calculate final metrics
+    total_predicted_positive = results['summary']['true_positives'] + results['summary']['false_positives']
+    total_actual_positive = results['summary']['true_positives'] + results['summary']['false_negatives']
+    
+    if total_predicted_positive > 0:
+        results['summary']['precision'] = results['summary']['true_positives'] / total_predicted_positive
+    
+    if total_actual_positive > 0:
+        results['summary']['recall'] = results['summary']['true_positives'] / total_actual_positive
+    
+    if results['summary']['precision'] + results['summary']['recall'] > 0:
+        results['summary']['f1_score'] = 2 * (results['summary']['precision'] * results['summary']['recall']) / (results['summary']['precision'] + results['summary']['recall'])
+    
+    # Save detailed evaluation summary
+    summary_file = results_dir / 'evaluation_summary.json'
     with open(summary_file, 'w') as f:
         json.dump(results, f, indent=4)
     
-    print(f"\nEvaluation complete! Summary saved to {summary_file}")
+    # Create one-page model assessment
+    report_file = results_dir / 'model_assessment.txt'
+    with open(report_file, 'w') as f:
+        # Header
+        f.write("Tick Detection Model Assessment\n")
+        f.write("=============================\n\n")
+
+        # Dataset Overview
+        f.write("Dataset Overview\n")
+        f.write("-----------------\n")
+        f.write(f"Total Images Evaluated: {results['summary']['total_images']}\n")
+        f.write(f"└── With Ticks:    {len(results['with_ticks']):4d} images\n")
+        f.write(f"└── Without Ticks: {len(results['without_ticks']):4d} images\n\n")
+
+        # Confusion Matrix
+        f.write("Confusion Matrix\n")
+        f.write("-----------------\n")
+        f.write("                  Predicted        \n")
+        f.write("                  Tick    No Tick  \n")
+        f.write("Actual   Tick     {:4d}     {:4d}    \n".format(
+            results['summary']['true_positives'],
+            results['summary']['false_negatives']
+        ))
+        f.write("         No Tick  {:4d}     {:4d}    \n\n".format(
+            results['summary']['false_positives'],
+            results['summary']['true_negatives']
+        ))
+
+        # Key Metrics
+        f.write("Performance Metrics\n")
+        f.write("-----------------\n")
+        precision = results['summary']['precision']
+        recall = results['summary']['recall']
+        f1 = results['summary']['f1_score']
+        accuracy = (results['summary']['true_positives'] + results['summary']['true_negatives']) / results['summary']['total_images']
+        
+        f.write(f"Precision: {precision:.3f}  (correct predictions among all tick predictions)\n")
+        f.write(f"Recall:    {recall:.3f}  (found ticks among all actual ticks)\n")
+        f.write(f"F1 Score:  {f1:.3f}  (harmonic mean of precision and recall)\n")
+        f.write(f"Accuracy:  {accuracy:.3f}  (correct predictions overall)\n\n")
+
+        # Confidence Analysis
+        f.write("Confidence Distribution\n")
+        f.write("-----------------\n")
+        f.write("Score Range    Count    % of Detections\n")
+        total_detections = sum(results['summary']['confidence_distribution'].values())
+        for range_str, count in sorted(results['summary']['confidence_distribution'].items(), reverse=True):
+            percentage = (count / total_detections * 100) if total_detections > 0 else 0
+            f.write(f"{range_str:12} {count:6d}    {percentage:6.1f}%\n")
+        f.write("\n")
+
+        # Error Analysis
+        f.write("Error Analysis\n")
+        f.write("-----------------\n")
+        false_pos_images = sum(1 for data in results['without_ticks'].values() if data['num_detections'] > 0)
+        missed_images = sum(1 for data in results['with_ticks'].values() if data['num_detections'] == 0)
+        
+        if false_pos_images > 0:
+            f.write(f"False Positives: {false_pos_images} images with incorrect detections\n")
+            # List top 3 worst false positives
+            worst_fp = sorted(
+                [(img, data) for img, data in results['without_ticks'].items() if data['num_detections'] > 0],
+                key=lambda x: x[1]['num_detections'],
+                reverse=True
+            )[:3]
+            for img, data in worst_fp:
+                f.write(f"└── {img}: {data['num_detections']} detection(s), ")
+                f.write(f"confidence {max(data['scores']):.2f}\n")
+        
+        if missed_images > 0:
+            f.write(f"\nMissed Detections: {missed_images} images with ticks not detected\n")
+            # List first 3 missed images
+            missed = [(img, data) for img, data in results['with_ticks'].items() if data['num_detections'] == 0][:3]
+            for img, data in missed:
+                f.write(f"└── {img}\n")
+
+    print(f"\nEvaluation complete!")
+    print(f"- Model assessment saved to: {report_file}")
+    print(f"- Detailed JSON results saved to: {summary_file}")
+    print(f"\nQuick Summary:")
+    print(f"- Precision: {precision:.3f}")
+    print(f"- Recall: {recall:.3f}")
+    print(f"- F1 Score: {f1:.3f}")
+    print(f"- Accuracy: {accuracy:.3f}")
+    
     return results
 
 if __name__ == '__main__':

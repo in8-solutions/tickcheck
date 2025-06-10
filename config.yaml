@@ -1,48 +1,78 @@
 model:
-  num_classes: 1  # Update this based on your number of object classes
+  name: "retinanet"
   backbone: "resnet50"
+  num_classes: 2  # Background and tick
+  device: "cuda"
   pretrained: true
-  freeze_backbone: true  # Freeze backbone for faster training
-  device: "cuda"  # Will fall back to CPU if CUDA is not available
-
-training:
-  batch_size: 16
-  num_epochs: 10
-  learning_rate: 0.0001
-  weight_decay: 0.0001
-  momentum: 0.9
-  lr_scheduler: "cosine"
-  warmup_epochs: 2
-  mixed_precision: true
-  num_workers: 6  # Increased from 4 to 6 for faster data loading
-  pin_memory: true
-  prefetch_factor: 3  # Increased from 2 to 3
-  persistent_workers: true
-  cudnn_benchmark: true
-  compile_model: false  # Disabled since we had issues with it
-  deterministic: false
-  allow_tf32: true
-  debug_cuda: false
-  max_autotune: false
-  # New optimizations
-  channels_last: true  # Use channels last memory format
-  grad_checkpointing: false  # Keep false since our model isn't that large
+  freeze_backbone: false  # Added parameter - don't freeze since we're doing a long training
 
 data:
   train_path: "data/images"
   train_annotations: "data/annotations.json"
   val_split: 0.2
-  input_size: [600, 600]  # Reduced from 800x800 to manage memory
-  mean: [0.485, 0.456, 0.406]
-  std: [0.229, 0.224, 0.225]
-  # New optimizations
-  pin_memory_device: "cuda"  # Pin memory directly to CUDA device
+  input_size: [640, 640]  # Reduced from 800x800
+  mean: [0.485, 0.456, 0.406]  # Added back normalization params
+  std: [0.229, 0.224, 0.225]   # Added back normalization params
+
+training:
+  # Basic training parameters
+  num_epochs: 100          # Increased from 50
+  batch_size: 7           # Reduced from 8 to avoid OOM during IoU calculations
+  learning_rate: 0.0001   # Slightly lower initial learning rate
+  weight_decay: 0.0001
+  
+  # Early stopping parameters
+  min_epochs: 30          # Must train at least this many epochs
+  patience: 10            # More patience before early stopping
+  
+  # Learning rate scheduling
+  lr_scheduler: "cosine"  # Cosine annealing
+  warmup_epochs: 5        # Gradual warmup
+  min_lr: 0.000001       # Minimum learning rate
+  
+  # Data loading
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: true
+  
+  # Mixed precision training
+  mixed_precision: true
+  channels_last: true     # Memory format optimization
+  
+  # CUDA optimizations
+  allow_tf32: true
+  
+  # Checkpointing and output
+  checkpoint_dir: "outputs/training/checkpoints"
+  output_dir: "outputs"
 
 augmentation:
-  horizontal_flip: true
-  vertical_flip: true
-  rotate: 45
-  brightness_contrast: true
+  train:
+    horizontal_flip: true
+    vertical_flip: true
+    rotate:
+      enabled: true
+      limit: 45
+    scale:
+      enabled: true
+      min: 0.8
+      max: 1.2
+    brightness:
+      enabled: true
+      limit: 0.2
+    contrast:
+      enabled: true
+      limit: 0.2
+    blur:
+      enabled: true
+      limit: 3
+    noise:
+      enabled: true
+      limit: 0.05
+  
+  val:
+    resize_only: true
 
 classes:
   # Update with your class names

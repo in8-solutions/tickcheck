@@ -5,6 +5,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import torchvision.transforms.functional as F
 from torchvision.ops import box_convert
+import os
+import json
 
 def load_config(config_path):
     """Load configuration from YAML file."""
@@ -13,8 +15,9 @@ def load_config(config_path):
 
 def create_directories(config):
     """Create necessary directories for training."""
-    Path(config['paths']['checkpoint_dir']).mkdir(parents=True, exist_ok=True)
-    Path(config['paths']['output_dir']).mkdir(parents=True, exist_ok=True)
+    os.makedirs(config['training']['checkpoint_dir'], exist_ok=True)
+    os.makedirs(config['training']['output_dir'], exist_ok=True)
+    os.makedirs(os.path.join(config['training']['output_dir'], 'training_curves'), exist_ok=True)
 
 def collate_fn(batch):
     """Custom collate function for data loader."""
@@ -64,7 +67,11 @@ def save_checkpoint(model, optimizer, epoch, config, filename):
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'config': config
+        'config': config,
+        'train_loss': model.train_loss if hasattr(model, 'train_loss') else None,
+        'val_loss': model.val_loss if hasattr(model, 'val_loss') else None,
+        'learning_rate': optimizer.param_groups[0]['lr'],
+        'history': model.history if hasattr(model, 'history') else None
     }
     torch.save(checkpoint, filename)
 
@@ -91,3 +98,44 @@ class AverageMeter:
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count 
+
+def plot_training_curves(history, output_dir):
+    """Plot and save training curves."""
+    plt.figure(figsize=(12, 8))
+    plt.subplot(2, 1, 1)
+    plt.plot(history['train_loss'], label='Training Loss')
+    plt.plot(history['val_loss'], label='Validation Loss')
+    plt.title('Model Loss Over Time')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True)
+
+    # Plot learning rate
+    plt.subplot(2, 1, 2)
+    plt.plot(history['learning_rates'], label='Learning Rate')
+    plt.title('Learning Rate Over Time')
+    plt.xlabel('Epoch')
+    plt.ylabel('Learning Rate')
+    plt.yscale('log')
+    plt.grid(True)
+    plt.legend()
+
+    plt.tight_layout()
+    
+    # Save the plot
+    curves_dir = os.path.join(output_dir, 'training_curves')
+    os.makedirs(curves_dir, exist_ok=True)  # Ensure directory exists
+    plt.savefig(os.path.join(curves_dir, 'training_curves.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Save raw data for future reference
+    with open(os.path.join(curves_dir, 'training_history.json'), 'w') as f:
+        json.dump({
+            'train_loss': history['train_loss'],
+            'val_loss': history['val_loss'],
+            'learning_rates': history['learning_rates'],
+            'epochs': len(history['train_loss']),
+            'best_val_loss': min(history['val_loss']),
+            'best_epoch': history['val_loss'].index(min(history['val_loss'])) + 1
+        }, f, indent=4) 
