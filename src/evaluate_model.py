@@ -32,7 +32,6 @@ import os
 import torch
 import numpy as np
 from PIL import Image, ImageDraw
-from torchvision import models
 from tqdm import tqdm
 import json
 from pathlib import Path
@@ -69,26 +68,17 @@ class ModelEvaluator:
         config_path = os.path.join('config', 'train_config.yaml')
         self.config = load_config(config_path)
         
-        # Load checkpoint first to get model structure
+        # Create model with our configuration
+        self.model = create_model(self.config)
+        
+        # Load checkpoint
         checkpoint = torch.load(model_path, map_location=self.device)
-        state_dict = checkpoint['model_state_dict']
-        
-        # Create model with matching architecture
-        self.model = models.detection.retinanet_resnet50_fpn(
-            num_classes=91,  # COCO classes
-            pretrained=False
-        )
-        
-        # Remove the extra 'model.' prefix from keys
-        state_dict = {k.replace('model.model.', 'model.'): v for k, v in state_dict.items()}
-        
-        # Load state dict with strict=False to handle missing/extra keys
-        self.model.load_state_dict(state_dict, strict=False)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model.to(self.device)
         self.model.eval()
         
         # Get transforms
-        self.transform = get_transform(inference_only=True, config=self.config)
+        self.transform = get_transform(self.config, train=False, inference_only=True)
         
         # Initialize metrics storage
         self.all_predictions = []
@@ -104,15 +94,12 @@ class ModelEvaluator:
         transformed = self.transform(image=image_np)
         image_tensor = transformed['image']
         
-        # Add batch dimension
-        image_tensor = image_tensor.unsqueeze(0)
-        
         # Move to device
         image_tensor = image_tensor.to(self.device)
         
-        # Get predictions
+        # Get predictions - pass as a list of images
         with torch.no_grad():
-            predictions = self.model(image_tensor)
+            predictions = self.model([image_tensor])
         
         # Debug print
         print(f"\nPredictions for {image_path}:")

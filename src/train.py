@@ -37,11 +37,13 @@ from typing import List, Dict, Tuple
 import argparse
 import shutil
 import time
+import gc
 
 from utils import load_config, create_directories, collate_fn, AverageMeter, save_checkpoint
 from dataset import DetectionDataset, get_transform
 from model import create_model
 from transforms import get_transform
+from dataset import MultiChunkDataset
 
 def print_gpu_memory():
     """Print current GPU memory usage if significant memory is being used.
@@ -306,234 +308,217 @@ def get_chunk_dirs(data_dir: str = "data") -> List[str]:
     return sorted(chunk_dirs)
 
 def main():
-    parser = argparse.ArgumentParser(description='Train RetinaNet model on COCO dataset')
-    parser.add_argument('--config', type=str, default='config/train_config.yaml',
-                      help='Path to configuration file')
-    parser.add_argument('--quick-test', action='store_true',
-                      help='Run a quick test with a small subset of data')
+    parser = argparse.ArgumentParser(description='Train tick detection model')
+    parser.add_argument('--config', type=str, default='config/train_config.yaml', help='Path to config file')
+    parser.add_argument('--quick-test', action='store_true', help='Run a quick test with a small subset of data')
     args = parser.parse_args()
     
-    try:
-        # Load configuration
-        config = load_config(args.config)
-        
-        # Create necessary directories
-        create_directories(config)
-        
-        # Set device
-        device = torch.device(config['training']['device'] if torch.cuda.is_available() else 'cpu')
-        print(f"Using device: {device}")
-        
-        # Get chunk directories
-        chunk_dirs = get_chunk_dirs()
-        if not chunk_dirs:
-            raise ValueError("No chunk directories found in data/")
-        
-        # Load and combine data from all chunks
-        all_train_images = []
-        all_val_images = []
-        all_train_anns = []
-        all_val_anns = []
-        
-        # For quick test, only use first chunk
-        if args.quick_test:
-            chunk_dirs = chunk_dirs[:1]
-            config['training']['num_epochs'] = 2
-            config['training']['batch_size'] = 4
-            print("\nRunning in quick test mode:")
-            print("- Using only first chunk")
-            print("- 2 epochs")
-            print("- Batch size: 4")
-        
-        for chunk_dir in chunk_dirs:
-            print(f"\nProcessing {os.path.basename(chunk_dir)}...")
-            train_images, val_images, train_anns, val_anns = load_chunk_data(chunk_dir)
-            
-            # Update image paths to point to chunk's images directory
-            chunk_name = os.path.basename(chunk_dir)
-            for img in train_images:
-                img['file_name'] = os.path.join(chunk_name, 'images', os.path.basename(img['file_name']))
-            for img in val_images:
-                img['file_name'] = os.path.join(chunk_name, 'images', os.path.basename(img['file_name']))
-            
-            all_train_images.extend(train_images)
-            all_val_images.extend(val_images)
-            all_train_anns.extend(train_anns)
-            all_val_anns.extend(val_anns)
-            
-            print(f"  - Added {len(train_images)} training images")
-            print(f"  - Added {len(val_images)} validation images")
-        
-        print(f"\nTotal dataset size:")
-        print(f"  - Training: {len(all_train_images)} images")
-        print(f"  - Validation: {len(all_val_images)} images")
-        
-        # Create datasets
-        train_transform = get_transform(config, train=True)
-        val_transform = get_transform(config, train=False)
-        
-        train_dataset = DetectionDataset(
-            image_dir="data",  # Base directory for all chunks
-            annotations={
-                'images': all_train_images,
-                'annotations': all_train_anns,
-                'categories': config['data']['categories']
-            },
-            transform=train_transform
-        )
-        
-        val_dataset = DetectionDataset(
-            image_dir="data",  # Base directory for all chunks
-            annotations={
-                'images': all_val_images,
-                'annotations': all_val_anns,
-                'categories': config['data']['categories']
-            },
-            transform=val_transform
-        )
-        
-        # For quick test, use smaller subset of data
-        if args.quick_test:
-            train_size = min(100, len(train_dataset))
-            val_size = min(20, len(val_dataset))
-            train_dataset = Subset(train_dataset, range(train_size))
-            val_dataset = Subset(val_dataset, range(val_size))
-            print(f"\nQuick test mode:")
-            print(f"  - Using {train_size} training images")
-            print(f"  - Using {val_size} validation images")
-        
-        # Create data loaders
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=config['training']['batch_size'],
-            shuffle=True,
-            num_workers=config['training']['num_workers'],
-            collate_fn=collate_fn,
-            pin_memory=True
-        )
-        
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=config['training']['batch_size'],
-            shuffle=False,
-            num_workers=config['training']['num_workers'],
-            collate_fn=collate_fn,
-            pin_memory=True
-        )
-        
-        # Create model
-        model = create_model(config)
-        
-        # Create optimizer
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=config['training']['learning_rate'],
-            weight_decay=config['training']['weight_decay']
-        )
-        
-        # Create learning rate scheduler
+    # Load configuration
+    config = load_config(args.config)
+    
+    # Modify config for quick test
+    if args.quick_test:
+        config['training']['num_epochs'] = 2  # Reduce epochs for quick test
+        config['training']['batch_size'] = 4  # Smaller batch size for quick test
+        print("\nRunning in quick test mode:")
+        print("- Using subset of multiple chunks")
+        print(f"- {config['training']['num_epochs']} epochs")
+        print(f"- Batch size: {config['training']['batch_size']}")
+    
+    # Create output directories
+    create_directories(config)
+    
+    # Set device
+    device = torch.device(config['training']['device'])
+    
+    # Create model
+    model = create_model(config)
+    model.to(device)
+    
+    # Create optimizer
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config['training']['learning_rate'],
+        weight_decay=config['training']['weight_decay']
+    )
+    
+    # Create learning rate scheduler
+    if config['training']['lr_scheduler']['name'] == 'reduce_on_plateau':
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode='min',
             factor=config['training']['lr_scheduler']['factor'],
-            patience=config['training']['lr_scheduler']['patience']
+            patience=config['training']['lr_scheduler']['patience'],
+            min_lr=config['training']['lr_scheduler']['min_lr']
+        )
+    
+    # Create transforms
+    train_transform = get_transform(config, train=True)
+    val_transform = get_transform(config, train=False)
+    
+    # Create datasets
+    if args.quick_test:
+        # Use a small subset of multiple chunks for quick testing
+        print("\nQuick test mode - using subset of multiple chunks:")
+        # Use first 3 chunks but only first 20 images from each
+        test_chunks = config['data']['train_paths'][:3]
+        test_anns = config['data']['train_annotations'][:3]
+        
+        for i, (img_dir, ann_file) in enumerate(zip(test_chunks, test_anns)):
+            print(f"Chunk {i+1}: {img_dir}")
+        
+        train_dataset = MultiChunkDataset(
+            image_dirs=test_chunks,
+            annotation_files=test_anns,
+            transform=train_transform
         )
         
-        # Create gradient scaler for mixed precision training
-        scaler = GradScaler() if config['training']['use_amp'] else None
+        # Take only first 20 images from each chunk for quick testing
+        total_test_images = min(20 * len(test_chunks), len(train_dataset))
+        train_dataset = Subset(train_dataset, range(total_test_images))
         
-        # Training loop
-        history = {
-            'train_loss': [],
-            'val_loss': [],
-            'learning_rates': []
-        }
+        # Split into train/val
+        val_size = int(len(train_dataset) * config['data']['val_split'])
+        train_size = len(train_dataset) - val_size
+        train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size])
+    else:
+        # Use all specified chunks
+        print("\nTraining with all specified chunks:")
+        for i, (img_dir, ann_file) in enumerate(zip(config['data']['train_paths'], config['data']['train_annotations'])):
+            print(f"Chunk {i+1}: {img_dir}")
         
-        best_val_loss = float('inf')
-        early_stopping_counter = 0
+        train_dataset = MultiChunkDataset(
+            image_dirs=config['data']['train_paths'],
+            annotation_files=config['data']['train_annotations'],
+            transform=train_transform
+        )
         
-        for epoch in range(config['training']['num_epochs']):
-            print(f"\nEpoch {epoch + 1}/{config['training']['num_epochs']}")
-            
-            # Train
-            train_metrics = train_one_epoch(model, optimizer, train_loader, device, scaler)
-            
-            # Validate
-            val_loss = validate(model, val_loader, device)
-            
-            # Update learning rate
+        # Create validation dataset from a portion of the training data
+        val_size = int(len(train_dataset) * config['data']['val_split'])
+        train_size = len(train_dataset) - val_size
+        train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size])
+    
+    print(f"\nDataset sizes:")
+    print(f"Total images: {len(train_dataset) + len(val_dataset)}")
+    print(f"Training images: {len(train_dataset)}")
+    print(f"Validation images: {len(val_dataset)}")
+    print(f"Batch size: {config['training']['batch_size']}")
+    print(f"Batches per epoch: {len(train_dataset) // config['training']['batch_size']}")
+    
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['training']['batch_size'],
+        shuffle=True,
+        num_workers=config['training']['num_workers'],
+        pin_memory=config['training']['pin_memory'],
+        collate_fn=collate_fn,
+        prefetch_factor=config['training']['prefetch_factor'],
+        persistent_workers=config['training']['persistent_workers']
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['training']['batch_size'],
+        shuffle=False,
+        num_workers=config['training']['num_workers'],
+        pin_memory=config['training']['pin_memory'],
+        collate_fn=collate_fn,
+        prefetch_factor=config['training']['prefetch_factor'],
+        persistent_workers=config['training']['persistent_workers']
+    )
+    
+    # Initialize mixed precision training
+    scaler = GradScaler() if config['training']['use_amp'] else None
+    
+    # Training loop
+    best_val_loss = float('inf')
+    patience_counter = 0
+    history = {
+        'train_loss': [],
+        'val_loss': [],
+        'learning_rates': []
+    }
+    
+    for epoch in range(config['training']['num_epochs']):
+        print(f"\nEpoch {epoch+1}/{config['training']['num_epochs']}")
+        
+        # Train
+        train_metrics = train_one_epoch(model, optimizer, train_loader, device, scaler)
+        history['train_loss'].append(train_metrics['loss'])
+        history['learning_rates'].append(optimizer.param_groups[0]['lr'])
+        
+        # Validate
+        val_loss = validate(model, val_loader, device)
+        history['val_loss'].append(val_loss)
+        
+        # Update learning rate
+        if config['training']['lr_scheduler']['name'] == 'reduce_on_plateau':
             scheduler.step(val_loss)
-            current_lr = optimizer.param_groups[0]['lr']
-            
-            # Update history
-            history['train_loss'].append(train_metrics['loss'])
-            history['val_loss'].append(val_loss)
-            history['learning_rates'].append(current_lr)
-            
-            # Print metrics
-            print(f"Train Loss: {train_metrics['loss']:.4f}")
-            print(f"Val Loss: {val_loss:.4f}")
-            print(f"Learning Rate: {current_lr:.6f}")
-            
-            # Save checkpoint
-            is_best = val_loss < best_val_loss
-            best_val_loss = min(val_loss, best_val_loss)
-            
-            # Create checkpoint filename
-            checkpoint_filename = os.path.join(
+        
+        # Save checkpoint
+        is_best = val_loss < best_val_loss
+        if is_best:
+            best_val_loss = val_loss
+            patience_counter = 0
+        
+        # Create checkpoint filename
+        checkpoint_filename = os.path.join(
+            config['output']['checkpoint_dir'],
+            f'checkpoint_epoch_{epoch + 1}.pt'
+        )
+        
+        # Save checkpoint
+        save_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            epoch=epoch + 1,
+            config=config,
+            filename=checkpoint_filename
+        )
+        
+        # Save best model if needed
+        if is_best:
+            best_model_filename = os.path.join(
                 config['output']['checkpoint_dir'],
-                f'checkpoint_epoch_{epoch + 1}.pt'
+                'best_model.pt'
             )
-            
-            # Save checkpoint
             save_checkpoint(
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch + 1,
                 config=config,
-                filename=checkpoint_filename
+                filename=best_model_filename
             )
-            
-            # Save best model if needed
-            if is_best:
-                best_model_filename = os.path.join(
-                    config['output']['checkpoint_dir'],
-                    'best_model.pt'
-                )
-                save_checkpoint(
-                    model=model,
-                    optimizer=optimizer,
-                    epoch=epoch + 1,
-                    config=config,
-                    filename=best_model_filename
-                )
-            
-            # Early stopping
-            if val_loss < best_val_loss:
-                early_stopping_counter = 0
-            else:
-                early_stopping_counter += 1
-                if early_stopping_counter >= config['training']['early_stopping_patience']:
-                    print(f"\nEarly stopping triggered after {epoch + 1} epochs")
-                    break
         
         # Plot training curves
         plot_training_curves(history, config['output']['output_dir'])
         
-        print("\nTraining completed successfully!")
-        
-    except Exception as e:
-        print(f"\nError during training: {str(e)}")
-        print("\nTraceback:")
-        traceback.print_exc()
-        
-        # Clean up temporary files
-        print("\nCleaning up...")
-        if os.path.exists('temp_annotations'):
-            shutil.rmtree('temp_annotations')
-        print("Cleanup complete.")
-        
-        raise e
+        # Early stopping
+        if epoch >= config['training']['min_epochs'] and patience_counter >= config['training']['early_stopping_patience']:
+            print(f"\nEarly stopping triggered after {epoch+1} epochs")
+            break
+    
+    print("\nTraining completed!")
+    
+    # Cleanup data loaders
+    del train_loader
+    del val_loader
+    torch.cuda.empty_cache()
+    
+    # Force garbage collection
+    gc.collect()
+    
+    print("Cleanup complete, exiting...")
+    sys.exit(0)
 
 if __name__ == '__main__':
-    main() 
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nTraining interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\nTraining failed with error: {str(e)}")
+        traceback.print_exc()
+        sys.exit(1) 

@@ -44,8 +44,8 @@ training:
   
   # CUDA optimizations
   allow_tf32: true
-  
-  # Checkpointing and output
+
+output:
   checkpoint_dir: "outputs/training/checkpoints"
   output_dir: "outputs"
 
