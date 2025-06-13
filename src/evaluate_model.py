@@ -65,7 +65,7 @@ class ModelEvaluator:
         self.confidence_threshold = confidence_threshold
         
         # Load configuration for transforms
-        config_path = os.path.join('config', 'train_config.yaml')
+        config_path = 'config.yaml'  # Updated to use top-level config
         self.config = load_config(config_path)
         
         # Create model with our configuration
@@ -101,74 +101,75 @@ class ModelEvaluator:
         with torch.no_grad():
             predictions = self.model([image_tensor])
         
-        # Debug print
-        print(f"\nPredictions for {image_path}:")
-        print(f"Boxes shape: {predictions[0]['boxes'].shape}")
-        print(f"Scores shape: {predictions[0]['scores'].shape}")
-        print(f"Labels shape: {predictions[0]['labels'].shape}")
-        print(f"Max score: {predictions[0]['scores'].max().item():.3f}")
-        
         return predictions[0]  # Remove batch dimension
         
     def evaluate_directory(self, input_dir, output_dir):
-        """Evaluate all images in a directory."""
-        # Create output directory
+        """Evaluate model on all images in a directory."""
         os.makedirs(output_dir, exist_ok=True)
         
-        # Get all image files
         image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        total_detections = 0
+        detection_counts = []
+        confidence_scores = []
         
-        # Process each image
+        # Process images with progress bar
         for image_file in tqdm(image_files, desc="Processing images"):
             image_path = os.path.join(input_dir, image_file)
-            output_path = os.path.join(output_dir, image_file)
+            output_path = os.path.join(output_dir, f"pred_{image_file}")
             
             # Get predictions
             predictions = self.predict_image(image_path)
+            boxes = predictions['boxes']
+            scores = predictions['scores']
+            labels = predictions['labels']
             
-            # Store predictions for metrics
-            self.all_predictions.append({
-                'boxes': predictions['boxes'].cpu().numpy(),
-                'scores': predictions['scores'].cpu().numpy(),
-                'labels': predictions['labels'].cpu().numpy()
-            })
+            # Update statistics
+            total_detections += len(boxes)
+            detection_counts.append(len(boxes))
+            if isinstance(scores, torch.Tensor):
+                confidence_scores.extend(scores.cpu().numpy().tolist())
+            else:
+                confidence_scores.extend(scores)
             
-            # Draw predictions on image
-            self.visualize_predictions(image_path, predictions, output_path)
+            # Save visualization
+            self.visualize_predictions(image_path, boxes, scores, labels, output_path)
         
-        # Calculate and save metrics
-        self.save_evaluation_report(output_dir)
+        # Generate and save report
+        self.generate_report(
+            total_images=len(image_files),
+            total_detections=total_detections,
+            detection_counts=detection_counts,
+            confidence_scores=confidence_scores,
+            output_dir=output_dir
+        )
 
-    def visualize_predictions(self, image_path, predictions, output_path):
+    def visualize_predictions(self, image_path, boxes, scores, labels, output_path):
         """Draw bounding boxes on image and save."""
         # Load image
-        image = Image.open(image_path).convert('RGB')
+        image = Image.open(image_path)
         draw = ImageDraw.Draw(image)
         
+        # Convert scores to numpy array if it's a tensor
+        if isinstance(scores, torch.Tensor):
+            scores = scores.cpu().numpy()
+        
         # Filter predictions by confidence
-        mask = predictions['scores'] >= self.confidence_threshold
-        boxes = predictions['boxes'][mask].cpu().numpy()
-        scores = predictions['scores'][mask].cpu().numpy()
+        mask = scores >= self.confidence_threshold
+        boxes = boxes[mask].cpu().numpy()
+        scores = scores[mask]
         
         # Draw each box
         for box, score in zip(boxes, scores):
-            # Convert box to integers
-            box = [int(x) for x in box]
-            
-            # Draw rectangle
-            draw.rectangle(box, outline='red', width=2)
-            
-            # Draw score
-            draw.text((box[0], box[1] - 10), f'{score:.2f}', fill='red')
+            x1, y1, x2, y2 = box
+            draw.rectangle([x1, y1, x2, y2], outline='red', width=2)
+            draw.text((x1, y1-10), f'{score:.2f}', fill='red')
         
         # Save image
         image.save(output_path)
 
-    def save_evaluation_report(self, output_dir):
+    def generate_report(self, total_images, total_detections, detection_counts, confidence_scores, output_dir):
         """Calculate and save evaluation metrics."""
         # Calculate metrics
-        total_images = len(self.all_predictions)
-        total_detections = sum(len(p['boxes']) for p in self.all_predictions)
         avg_detections = total_detections / total_images if total_images > 0 else 0
         
         # Calculate detection distribution
@@ -179,13 +180,12 @@ class ModelEvaluator:
             '>10': 0
         }
         
-        for pred in self.all_predictions:
-            num_detections = len(pred['boxes'])
-            if num_detections <= 1:
+        for count in detection_counts:
+            if count <= 1:
                 detection_ranges['0-1'] += 1
-            elif num_detections <= 5:
+            elif count <= 5:
                 detection_ranges['2-5'] += 1
-            elif num_detections <= 10:
+            elif count <= 10:
                 detection_ranges['6-10'] += 1
             else:
                 detection_ranges['>10'] += 1
@@ -199,19 +199,18 @@ class ModelEvaluator:
             '0.9-1.0': 0
         }
         
-        for pred in self.all_predictions:
-            for score in pred['scores']:
-                if score >= 0.5:
-                    if score < 0.6:
-                        confidence_ranges['0.5-0.6'] += 1
-                    elif score < 0.7:
-                        confidence_ranges['0.6-0.7'] += 1
-                    elif score < 0.8:
-                        confidence_ranges['0.7-0.8'] += 1
-                    elif score < 0.9:
-                        confidence_ranges['0.8-0.9'] += 1
-                    else:
-                        confidence_ranges['0.9-1.0'] += 1
+        for score in confidence_scores:
+            if score >= 0.5:
+                if score < 0.6:
+                    confidence_ranges['0.5-0.6'] += 1
+                elif score < 0.7:
+                    confidence_ranges['0.6-0.7'] += 1
+                elif score < 0.8:
+                    confidence_ranges['0.7-0.8'] += 1
+                elif score < 0.9:
+                    confidence_ranges['0.8-0.9'] += 1
+                else:
+                    confidence_ranges['0.9-1.0'] += 1
         
         # Save metrics to JSON file
         metrics = {

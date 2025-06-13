@@ -2,20 +2,42 @@ model:
   name: "retinanet"
   backbone: "resnet50"
   num_classes: 2  # Background and tick
-  device: "cuda"
   pretrained: true
   freeze_backbone: false  # Added parameter - don't freeze since we're doing a long training
+  min_size: 640  # Minimum size for image resizing
+  max_size: 640  # Maximum size for image resizing
+  box_score_thresh: 0.05  # Minimum score for box detection
+  box_nms_thresh: 0.5  # NMS IoU threshold
+  box_detections_per_img: 100  # Maximum number of detections per image
+  anchor_sizes: [32, 64, 128, 256, 512]  # Anchor sizes for different feature levels
+  anchor_ratios: [0.5, 1.0, 2.0]  # Anchor aspect ratios
 
 data:
-  train_path: "data/images"
-  train_annotations: "data/annotations.json"
+  train_paths:  # Updated to use multiple chunks
+    - "data/chunk_001/images"
+    - "data/chunk_002/images"
+    - "data/chunk_003/images"
+    - "data/chunk_004/images"
+    - "data/chunk_005/images"
+  train_annotations:  # Updated to use multiple annotation files
+    - "data/chunk_001/annotations.json"
+    - "data/chunk_002/annotations.json"
+    - "data/chunk_003/annotations.json"
+    - "data/chunk_004/annotations.json"
+    - "data/chunk_005/annotations.json"
   val_split: 0.2
   input_size: [640, 640]  # Reduced from 800x800
   mean: [0.485, 0.456, 0.406]  # Added back normalization params
   std: [0.229, 0.224, 0.225]   # Added back normalization params
+  categories:  # Added categories based on class definitions
+    - id: 0
+      name: "tick"
+    - id: 1
+      name: "background"
 
 training:
   # Basic training parameters
+  device: "cuda"  # Moved from model section
   num_epochs: 100          # Increased from 50
   batch_size: 7           # Reduced from 8 to avoid OOM during IoU calculations
   learning_rate: 0.0001   # Initial learning rate
@@ -23,7 +45,7 @@ training:
   
   # Early stopping parameters
   min_epochs: 30          # Must train at least this many epochs
-  patience: 10            # More patience before early stopping
+  early_stopping_patience: 10  # Renamed from patience to match code
   
   # Learning rate scheduling
   lr_scheduler:
@@ -39,7 +61,7 @@ training:
   persistent_workers: true
   
   # Mixed precision training
-  mixed_precision: true
+  use_amp: true  # Renamed from mixed_precision to match code
   channels_last: true     # Memory format optimization
   
   # CUDA optimizations
@@ -48,6 +70,8 @@ training:
 output:
   checkpoint_dir: "outputs/training/checkpoints"
   output_dir: "outputs"
+  training_curves: "outputs/training/curves"
+  evaluation_dir: "outputs/evaluation"
 
 augmentation:
   train:

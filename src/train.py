@@ -309,7 +309,7 @@ def get_chunk_dirs(data_dir: str = "data") -> List[str]:
 
 def main():
     parser = argparse.ArgumentParser(description='Train tick detection model')
-    parser.add_argument('--config', type=str, default='config/train_config.yaml', help='Path to config file')
+    parser.add_argument('--config', type=str, default='config.yaml', help='Path to config file')
     parser.add_argument('--quick-test', action='store_true', help='Run a quick test with a small subset of data')
     args = parser.parse_args()
     
