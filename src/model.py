@@ -15,122 +15,153 @@ Key Features:
 import math
 import torch
 import torch.nn as nn
-import torchvision
-from torchvision.models.detection.retinanet import RetinaNet, RetinaNetHead
-from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
+import torch.nn.functional as F
+from torchvision.models.detection import retinanet_resnet50_fpn
 from torchvision.models.detection.anchor_utils import AnchorGenerator
-from torchvision.models.resnet import ResNet50_Weights
+from torchvision.models.detection.transform import GeneralizedRCNNTransform
+from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
+from torchvision.models.detection.retinanet import RetinaNet_ResNet50_FPN_Weights
+from torchvision.models.detection.retinanet import RetinaNetClassificationHead, RetinaNetRegressionHead
 
-class CustomRetinaNet(nn.Module):
-    """Custom RetinaNet implementation for tick detection.
-    
-    This class implements a RetinaNet model with:
-    1. ResNet50-FPN backbone (optionally pretrained on ImageNet)
-    2. Custom anchor generation with multiple scales and aspect ratios
-    3. Focal Loss for handling class imbalance
-    4. Configurable backbone freezing for transfer learning
-    
-    The model follows the architecture described in the RetinaNet paper:
-    "Focal Loss for Dense Object Detection" (https://arxiv.org/abs/1708.02002)
-    
-    Args:
-        num_classes (int): Number of object classes to detect
-        pretrained (bool): Whether to use ImageNet pretrained backbone
-        freeze_backbone (bool): Whether to freeze the backbone for transfer learning
-    """
-    def __init__(self, num_classes, pretrained=True, freeze_backbone=False):
+class RetinaNetHead(nn.Module):
+    def __init__(self, in_channels, num_anchors, num_classes):
         super().__init__()
-        
-        # Create backbone with updated weights parameter
-        backbone = resnet_fpn_backbone(
-            backbone_name='resnet50',
-            weights=ResNet50_Weights.IMAGENET1K_V1 if pretrained else None,
-            trainable_layers=0 if freeze_backbone else 5
+        self.classification_head = RetinaNetClassificationHead(
+            in_channels, num_anchors, num_classes
+        )
+        self.regression_head = RetinaNetRegressionHead(
+            in_channels, num_anchors
         )
         
-        # Create anchor generator
+    def forward(self, x):
+        cls_logits = []
+        bbox_regression = []
+        
+        # x is a list of feature maps from FPN
+        for feature in x:
+            # Ensure feature is 4D (batch, channels, height, width)
+            if len(feature.shape) == 3:
+                feature = feature.unsqueeze(0)
+            cls_logits.append(self.classification_head(feature))
+            bbox_regression.append(self.regression_head(feature))
+            
+        return {
+            "cls_logits": cls_logits,
+            "bbox_regression": bbox_regression
+        }
+        
+    def compute_loss(self, targets, head_outputs, anchors, matched_idxs):
+        """
+        Compute the losses for the RetinaNet head.
+        
+        Args:
+            targets (List[Dict]): List of target dictionaries
+            head_outputs (Dict): Dictionary containing classification and regression outputs
+            anchors (List[Tensor]): List of anchor boxes for each feature level
+            matched_idxs (List[Tensor]): List of matched indices for each feature level
+            
+        Returns:
+            Dict containing classification and regression losses
+        """
+        cls_logits = head_outputs["cls_logits"]
+        bbox_regression = head_outputs["bbox_regression"]
+        
+        # Compute classification loss
+        cls_loss = self.classification_head.compute_loss(
+            targets, cls_logits, anchors, matched_idxs
+        )
+        
+        # Compute regression loss
+        reg_loss = self.regression_head.compute_loss(
+            targets, bbox_regression, anchors, matched_idxs
+        )
+        
+        return {
+            "loss_classifier": cls_loss,
+            "loss_box_reg": reg_loss
+        }
+
+class TickDetector(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        
+        # Create the internal RetinaNet model with COCO weights
+        self.model = retinanet_resnet50_fpn(
+            weights=RetinaNet_ResNet50_FPN_Weights.COCO_V1,
+            num_classes=91,  # COCO has 91 classes
+            min_size=config['model']['min_size'],
+            max_size=config['model']['max_size'],
+            box_score_thresh=config['model']['box_score_thresh'],
+            box_nms_thresh=config['model']['box_nms_thresh'],
+            box_detections_per_img=config['model']['box_detections_per_img']
+        )
+        
+        # Update anchor sizes and ratios
+        anchor_sizes = config['model']['anchor_sizes']
+        anchor_ratios = config['model']['anchor_ratios']
+        
+        # Create anchor generator with updated sizes
         anchor_generator = AnchorGenerator(
-            sizes=tuple((x, int(x * 2 ** (1.0 / 3)), int(x * 2 ** (2.0 / 3))) 
-                  for x in [32, 64, 128, 256, 512]),
-            aspect_ratios=tuple((0.5, 1.0, 2.0) for _ in range(5))
+            sizes=tuple((s,) for s in anchor_sizes),
+            aspect_ratios=tuple((r,) for r in anchor_ratios)
         )
         
-        # Create head
-        head = RetinaNetHead(
-            backbone.out_channels,
-            anchor_generator.num_anchors_per_location()[0],
-            num_classes,
-            norm_layer=nn.BatchNorm2d
-        )
+        # Update the anchor generator in the head
+        self.model.head.anchor_generator = anchor_generator
         
-        # Create RetinaNet model
-        self.model = RetinaNet(
-            backbone,
-            num_classes,
-            anchor_generator=anchor_generator,
-            head=head,
-            score_thresh=0.05,
-            nms_thresh=0.5,
-            detections_per_img=100,
-            topk_candidates=1000
-        )
-        
-        # Initialize weights
-        if pretrained:
-            self._initialize_weights()
-    
-    def _initialize_weights(self):
-        """Initialize classification and regression layers."""
-        for name, param in self.model.head.named_parameters():
-            if "classification" in name:
-                if param.dim() > 1:
-                    torch.nn.init.normal_(param, mean=0.0, std=0.01)
-                else:
-                    torch.nn.init.constant_(param, -math.log((1 - 0.01) / 0.01))
-            elif "bbox_regression" in name:
-                torch.nn.init.normal_(param, mean=0.0, std=0.01)
-    
+        # Freeze backbone if specified
+        if config['model']['freeze_backbone']:
+            for param in self.model.backbone.parameters():
+                param.requires_grad = False
+                
     def forward(self, images, targets=None):
-        if self.training and targets is None:
-            raise ValueError("In training mode, targets should not be None")
+        """
+        Forward pass of the model.
         
+        Args:
+            images (List[Tensor]): List of images to process
+            targets (List[Dict], optional): List of target dictionaries containing:
+                - boxes (Tensor[N, 4]): Ground truth boxes in [x1, y1, x2, y2] format
+                - labels (Tensor[N]): Class labels for each box
+                
+        Returns:
+            During training:
+                Dict containing losses
+            During inference:
+                List[Dict] containing predictions with boxes, labels, and scores
+        """
+        if self.training and targets is None:
+            raise ValueError("In training mode, targets should be passed")
+            
         try:
+            # Convert images to list if they're not already
+            if not isinstance(images, list):
+                images = [images]
+                
+            # Convert targets to list if they're not already
+            if targets is not None and not isinstance(targets, list):
+                targets = [targets]
+                
+            # Forward pass through the model
             return self.model(images, targets)
+            
         except Exception as e:
-            print(f"Error in model forward pass: {str(e)}")
-            raise e
+            print(f"Error in forward pass: {str(e)}")
+            print(f"Images shape: {[img.shape for img in images]}")
+            if targets is not None:
+                print(f"Targets: {targets}")
+            raise
 
 def create_model(config):
-    """Create and configure the RetinaNet model based on config settings.
+    """Create and configure the model based on the provided configuration."""
+    model_config = config['model']
     
-    This function:
-    1. Creates a CustomRetinaNet instance with specified parameters
-    2. Moves the model to the appropriate device (GPU/CPU)
-    3. Prints device information for debugging
+    # Create model with pretrained weights
+    model = TickDetector(config)
     
-    Args:
-        config (dict): Configuration dictionary containing model settings
-            Required keys:
-            - model.num_classes: Number of object classes
-            - model.pretrained: Whether to use pretrained backbone
-            - model.freeze_backbone: Whether to freeze backbone
-            - model.device: Device to place model on
-    
-    Returns:
-        CustomRetinaNet: Configured model instance on specified device
-    """
-    model = CustomRetinaNet(
-        num_classes=config['model']['num_classes'],
-        pretrained=config['model']['pretrained'],
-        freeze_backbone=config['model']['freeze_backbone']
-    )
-    
-    # Move model to appropriate device
-    device = torch.device(config['model']['device'] if torch.cuda.is_available() else 'cpu')
-    print(f'Using device: {device}')
-    if device.type == 'cuda':
-        print(f'GPU: {torch.cuda.get_device_name(0)}')
-        
+    # Set device
+    device = torch.device(config['training']['device'])
     model = model.to(device)
     
     return model 

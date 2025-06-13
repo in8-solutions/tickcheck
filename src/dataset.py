@@ -32,128 +32,147 @@ class DetectionDataset(Dataset):
     
     Args:
         image_dir (str): Directory containing the images
-        annotation_file (str): Path to COCO format annotation JSON file
-        transforms (albumentations.Compose, optional): Transformations to apply
-        train (bool): Whether this is a training dataset (affects augmentations)
+        annotation_file (str, optional): Path to COCO format annotation JSON file
+        annotations: Direct annotations dictionary (optional)
+        transform (albumentations.Compose, optional): Transformations to apply
     """
-    def __init__(self, image_dir, annotation_file, transforms=None, train=True):
+    def __init__(self, image_dir, annotation_file=None, annotations=None, transform=None):
+        """
+        Args:
+            image_dir: Directory with all the images
+            annotation_file: Path to the annotation file (optional)
+            annotations: Direct annotations (list or dict) (optional)
+            transform: Optional transform to be applied on a sample
+        """
         self.image_dir = image_dir
-        self.transforms = transforms
-        self.train = train
+        self.transform = transform
         
-        # Load annotations
-        with open(annotation_file, 'r') as f:
-            self.annotations = json.load(f)
+        # Load annotations either from file or directly
+        if annotation_file is not None:
+            with open(annotation_file, 'r') as f:
+                self.annotations = json.load(f)
+        else:
+            self.annotations = annotations
             
-        # Create image_id to annotations mapping
-        self.image_to_annotations = {}
-        for ann in self.annotations['annotations']:
-            img_id = ann['image_id']
-            if img_id not in self.image_to_annotations:
-                self.image_to_annotations[img_id] = []
-            self.image_to_annotations[img_id].append(ann)
+        # Handle both list and dictionary annotation formats
+        if isinstance(self.annotations, list):
+            # If annotations is a list, assume it's a list of annotation dictionaries
+            self.image_to_anns = {}
+            for ann in self.annotations:
+                image_id = ann['image_id']
+                if image_id not in self.image_to_anns:
+                    self.image_to_anns[image_id] = []
+                self.image_to_anns[image_id].append(ann)
+                
+            # Create image id to filename mapping from annotations
+            self.image_id_to_filename = {}
+            for ann in self.annotations:
+                image_id = ann['image_id']
+                if image_id not in self.image_id_to_filename:
+                    # Get filename from the image info in the annotation
+                    if 'image' in ann:
+                        self.image_id_to_filename[image_id] = ann['image']['file_name']
+                    else:
+                        # If no image info, construct filename from image_id
+                        self.image_id_to_filename[image_id] = f"image_{image_id}.jpg"
+        else:
+            # If annotations is a dictionary, use the standard COCO format
+            self.image_to_anns = {}
+            for ann in self.annotations['annotations']:
+                image_id = ann['image_id']
+                if image_id not in self.image_to_anns:
+                    self.image_to_anns[image_id] = []
+                self.image_to_anns[image_id].append(ann)
+                
+            # Create image id to filename mapping
+            self.image_id_to_filename = {
+                img['id']: img['file_name'] for img in self.annotations['images']
+            }
             
-        # Create image_id to file mapping for all images, including those without annotations
+        # Get unique image ids
+        self.image_ids = list(self.image_to_anns.keys())
+        
+        # Create category mapping if categories are provided
+        if isinstance(self.annotations, dict) and 'categories' in self.annotations:
+            # Ensure category IDs start from 1 (0 is reserved for background)
+            self.cat_mapping = {cat['id']: cat['id'] for cat in self.annotations['categories']}
+        else:
+            # If no categories provided, assume all annotations are for class 1 (tick)
+            self.cat_mapping = {1: 1}
+        
         self.image_info = {img['id']: img for img in self.annotations['images']}
-        
-        # Get list of all image ids, including those without annotations
-        self.image_ids = [img['id'] for img in self.annotations['images']]
-        
-        # Create category mapping
-        self.cat_mapping = {cat['id']: idx for idx, cat in enumerate(self.annotations['categories'])}
-        
+    
     def __len__(self):
         return len(self.image_ids)
     
     def __getitem__(self, idx):
-        # Get image id and info
-        img_id = self.image_ids[idx]
-        img_info = self.image_info[img_id]
+        image_id = self.image_ids[idx]
+        filename = self.image_id_to_filename[image_id]
+        
+        # Get the image info
+        image_info = next(img for img in self.annotations['images'] if img['id'] == image_id)
+        # The file_name should be just the image name, not the full path
+        image_path = os.path.join(self.image_dir, filename)
         
         # Load image
-        img_path = os.path.join(self.image_dir, img_info['file_name'])
-        image = Image.open(img_path).convert('RGB')
+        image = Image.open(image_path).convert('RGB')
         image = np.array(image)
         
-        # Get annotations if they exist
+        # Get image dimensions for normalization
+        height, width = image.shape[:2]
+        
+        # Get annotations for this image
+        anns = self.image_to_anns[image_id]
+        
+        # Extract boxes and labels
         boxes = []
         labels = []
-        
-        if img_id in self.image_to_annotations:
-            anns = self.image_to_annotations[img_id]
-            height, width = image.shape[:2]
+        for ann in anns:
+            bbox = ann['bbox']  # [x, y, width, height]
+            # Convert to [x1, y1, x2, y2] format
+            x1 = bbox[0]
+            y1 = bbox[1]
+            x2 = bbox[0] + bbox[2]
+            y2 = bbox[1] + bbox[3]
             
-            for ann in anns:
-                # Get bbox in [x_min, y_min, width, height] format
-                bbox = ann['bbox']
-                
-                # Convert COCO format [x, y, width, height] to [x1, y1, x2, y2]
-                x1 = float(bbox[0])
-                y1 = float(bbox[1])
-                x2 = float(bbox[0] + bbox[2])
-                y2 = float(bbox[1] + bbox[3])
-                
-                # Ensure coordinates are valid
-                if x2 <= x1 or y2 <= y1:
-                    continue
-                
-                # For Albumentations, we need normalized coordinates
-                if self.transforms:
-                    # Clip coordinates to image boundaries first
-                    x1 = max(0, min(x1, width))
-                    y1 = max(0, min(y1, height))
-                    x2 = max(0, min(x2, width))
-                    y2 = max(0, min(y2, height))
-                    
-                    # Then normalize to [0,1] range
-                    x1_norm = x1 / width
-                    y1_norm = y1 / height
-                    x2_norm = x2 / width
-                    y2_norm = y2 / height
-                    
-                    # Double-check normalization (shouldn't be needed but just to be safe)
-                    x1_norm = max(0.0, min(1.0, x1_norm))
-                    y1_norm = max(0.0, min(1.0, y1_norm))
-                    x2_norm = max(0.0, min(1.0, x2_norm))
-                    y2_norm = max(0.0, min(1.0, y2_norm))
-                    
-                    # Skip invalid boxes after normalization
-                    if x2_norm <= x1_norm or y2_norm <= y1_norm:
-                        continue
-                        
-                    boxes.append([x1_norm, y1_norm, x2_norm, y2_norm])
-                else:
-                    boxes.append([x1, y1, x2, y2])
-                    
-                labels.append(self.cat_mapping[ann['category_id']])
+            # Clip coordinates to image boundaries
+            x1 = np.clip(x1, 0, width)
+            y1 = np.clip(y1, 0, height)
+            x2 = np.clip(x2, 0, width)
+            y2 = np.clip(y2, 0, height)
+            
+            # Only add box if it's valid
+            if x1 < x2 and y1 < y2 and (x2 - x1) > 1 and (y2 - y1) > 1:
+                boxes.append([x1, y1, x2, y2])
+                # Map category ID to ensure it starts from 1
+                category_id = ann['category_id']
+                labels.append(self.cat_mapping.get(category_id, 1))  # Default to 1 if not found
+            
+        if not boxes:  # If no valid boxes, create a dummy box
+            boxes = [[0, 0, width, height]]
+            labels = [1]
+            
+        boxes = np.array(boxes, dtype=np.float32)
+        labels = np.array(labels, dtype=np.int64)
         
-        # Convert to numpy arrays with explicit float32 dtype for boxes and int64 for labels
-        if boxes:
-            boxes = np.array(boxes, dtype=np.float32)
-            labels = np.array(labels, dtype=np.int64)
-        else:
-            boxes = np.zeros((0, 4), dtype=np.float32)
-            labels = np.zeros((0,), dtype=np.int64)
-        
-        # Apply transforms if specified
-        if self.transforms:
-            transformed = self.transforms(image=image, bboxes=boxes, labels=labels)
+        # Apply transforms
+        if self.transform:
+            transformed = self.transform(image=image, bboxes=boxes, labels=labels)
             image = transformed['image']
             boxes = torch.tensor(transformed['bboxes'], dtype=torch.float32)
             labels = torch.tensor(transformed['labels'], dtype=torch.int64)
-            
-            # Denormalize boxes back to absolute coordinates
-            height, width = image.shape[1:3]  # Image is now in CxHxW format
-            boxes[:, [0, 2]] *= width
-            boxes[:, [1, 3]] *= height
         else:
-            image = torch.from_numpy(image.transpose((2, 0, 1))).float() / 255.0
+            image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
             boxes = torch.tensor(boxes, dtype=torch.float32)
             labels = torch.tensor(labels, dtype=torch.int64)
-        
+            
+        # Create target dictionary
         target = {
             'boxes': boxes,
             'labels': labels,
+            'image_id': torch.tensor([image_id]),
+            'area': torch.tensor([(box[2] - box[0]) * (box[3] - box[1]) for box in boxes], dtype=torch.float32),
+            'iscrowd': torch.zeros((len(boxes),), dtype=torch.int64)
         }
         
         return image, target

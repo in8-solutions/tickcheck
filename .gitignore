@@ -1,6 +1,6 @@
 # Data directory
-/data/
-/data/*
+# /data/
+# /data/*
 
 # Dependencies
 /node_modules/
@@ -69,4 +69,18 @@ var/
 wheels/
 *.egg-info/
 .installed.cfg
-*.egg 
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Data - only ignore image files
+data/chunk_*/images/*.jpg
+data/chunk_*/images/*.jpeg
+data/chunk_*/images/*.png
+
+# Logs
+*.log
+logs/ 

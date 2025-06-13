@@ -31,6 +31,8 @@ import json
 from typing import List, Tuple
 from copy import deepcopy
 from math import ceil
+import shutil
+from datetime import datetime
 
 def load_config(config_path):
     """Load configuration from YAML file.
@@ -45,19 +47,18 @@ def load_config(config_path):
         return yaml.safe_load(f)
 
 def create_directories(config):
-    """Create necessary directories for training outputs.
-    
-    Creates directories for:
-    - Model checkpoints
-    - Training outputs
-    - Training curve visualizations
+    """
+    Create necessary directories for training.
     
     Args:
-        config (dict): Configuration dictionary containing path information
+        config: Configuration dictionary
     """
-    os.makedirs(config['training']['checkpoint_dir'], exist_ok=True)
-    os.makedirs(config['training']['output_dir'], exist_ok=True)
-    os.makedirs(os.path.join(config['training']['output_dir'], 'training_curves'), exist_ok=True)
+    # Create output directories
+    os.makedirs(config['output']['checkpoint_dir'], exist_ok=True)
+    os.makedirs(config['output']['output_dir'], exist_ok=True)
+    
+    # Create temp directory for annotations
+    os.makedirs('temp_annotations', exist_ok=True)
 
 def collate_fn(batch):
     """Custom collate function for object detection data loading.
@@ -254,19 +255,19 @@ def plot_training_curves(history, output_dir):
 
 def split_coco_annotations(annotation_file: str, 
                          chunk_size: int = 1000,
-                         output_dir: str = "data/annotations_chunks") -> List[str]:
+                         output_dir: str = "data/chunks") -> List[str]:
     """
-    Split a COCO annotation file into smaller chunks.
+    Split a COCO annotation file into smaller chunks, each with its own directory.
     
     Args:
         annotation_file: Path to the original COCO annotation file
         chunk_size: Number of images per chunk
-        output_dir: Directory to save the chunk files
+        output_dir: Base directory to save the chunks
         
     Returns:
-        List of paths to the created chunk files
+        List of paths to the created chunk directories
     """
-    # Create output directory if it doesn't exist
+    # Create base output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     
     # Load the original annotation file
@@ -285,24 +286,41 @@ def split_coco_annotations(annotation_file: str,
     num_images = len(coco_data['images'])
     num_chunks = ceil(num_images / chunk_size)
     
-    chunk_files = []
+    chunk_dirs = []
     
     # Create chunks
     for chunk_idx in range(num_chunks):
         start_idx = chunk_idx * chunk_size
         end_idx = min((chunk_idx + 1) * chunk_size, num_images)
         
+        # Create chunk directory
+        chunk_dir = os.path.join(output_dir, f'chunk_{chunk_idx + 1:03d}')
+        chunk_images_dir = os.path.join(chunk_dir, 'images')
+        os.makedirs(chunk_images_dir, exist_ok=True)
+        
         # Create a new COCO structure for this chunk
         chunk_data = {
-            'info': deepcopy(coco_data['info']),
-            'licenses': deepcopy(coco_data['licenses']),
             'categories': deepcopy(coco_data['categories']),
             'images': [],
             'annotations': []
         }
         
-        # Add chunk number to info
-        chunk_data['info']['description'] = f"{chunk_data['info'].get('description', '')} - Chunk {chunk_idx + 1}/{num_chunks}"
+        # Add optional fields if they exist
+        if 'info' in coco_data:
+            chunk_data['info'] = deepcopy(coco_data['info'])
+            # Add chunk number to info if it exists
+            if 'description' in chunk_data['info']:
+                chunk_data['info']['description'] = f"{chunk_data['info']['description']} - Chunk {chunk_idx + 1}/{num_chunks}"
+            else:
+                chunk_data['info']['description'] = f"Chunk {chunk_idx + 1}/{num_chunks}"
+        else:
+            chunk_data['info'] = {
+                'description': f"Chunk {chunk_idx + 1}/{num_chunks}",
+                'date_created': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+        if 'licenses' in coco_data:
+            chunk_data['licenses'] = deepcopy(coco_data['licenses'])
         
         # Add images for this chunk
         chunk_images = coco_data['images'][start_idx:end_idx]
@@ -314,87 +332,24 @@ def split_coco_annotations(annotation_file: str,
             if img_id in image_to_anns:
                 chunk_data['annotations'].extend(image_to_anns[img_id])
         
-        # Save chunk to file
-        chunk_file = os.path.join(output_dir, f'annotations_chunk_{chunk_idx + 1:03d}.json')
-        with open(chunk_file, 'w') as f:
+        # Save chunk annotations
+        chunk_annotations_file = os.path.join(chunk_dir, 'annotations.json')
+        with open(chunk_annotations_file, 'w') as f:
             json.dump(chunk_data, f, indent=2)
         
-        chunk_files.append(chunk_file)
+        # Copy images to chunk directory
+        for img in chunk_images:
+            src_path = os.path.join('data/images', img['file_name'])
+            dst_path = os.path.join(chunk_images_dir, img['file_name'])
+            if os.path.exists(src_path):
+                shutil.copy2(src_path, dst_path)
+            else:
+                print(f"Warning: Image not found: {src_path}")
         
-        print(f"Created chunk {chunk_idx + 1}/{num_chunks} with {len(chunk_images)} images "
-              f"and {len(chunk_data['annotations'])} annotations")
+        chunk_dirs.append(chunk_dir)
+        
+        print(f"Created chunk {chunk_idx + 1}/{num_chunks} in {chunk_dir}")
+        print(f"  - {len(chunk_images)} images")
+        print(f"  - {len(chunk_data['annotations'])} annotations")
     
-    return chunk_files
-
-def create_train_val_split_chunks(chunk_files: List[str], 
-                                val_ratio: float = 0.2,
-                                random_seed: int = 42) -> Tuple[List[str], List[str]]:
-    """
-    Create train/val splits for each annotation chunk.
-    
-    Args:
-        chunk_files: List of paths to chunk files
-        val_ratio: Ratio of validation set size (0-1)
-        random_seed: Random seed for reproducibility
-        
-    Returns:
-        Tuple of (train_files, val_files)
-    """
-    import json
-    import os
-    import random
-    from copy import deepcopy
-    
-    random.seed(random_seed)
-    
-    train_files = []
-    val_files = []
-    
-    for chunk_file in chunk_files:
-        # Load chunk data
-        with open(chunk_file, 'r') as f:
-            chunk_data = json.load(f)
-            
-        # Get list of image IDs and shuffle
-        image_ids = [img['id'] for img in chunk_data['images']]
-        random.shuffle(image_ids)
-        
-        # Split into train/val
-        split_idx = int(len(image_ids) * (1 - val_ratio))
-        train_ids = set(image_ids[:split_idx])
-        val_ids = set(image_ids[split_idx:])
-        
-        # Create train/val datasets
-        train_data = deepcopy(chunk_data)
-        val_data = deepcopy(chunk_data)
-        
-        # Filter images
-        train_data['images'] = [img for img in chunk_data['images'] if img['id'] in train_ids]
-        val_data['images'] = [img for img in chunk_data['images'] if img['id'] in val_ids]
-        
-        # Filter annotations
-        train_data['annotations'] = [ann for ann in chunk_data['annotations'] 
-                                   if ann['image_id'] in train_ids]
-        val_data['annotations'] = [ann for ann in chunk_data['annotations'] 
-                                 if ann['image_id'] in val_ids]
-        
-        # Save split files
-        base_dir = os.path.dirname(chunk_file)
-        base_name = os.path.splitext(os.path.basename(chunk_file))[0]
-        
-        train_file = os.path.join(base_dir, f'{base_name}_train.json')
-        val_file = os.path.join(base_dir, f'{base_name}_val.json')
-        
-        with open(train_file, 'w') as f:
-            json.dump(train_data, f, indent=2)
-        with open(val_file, 'w') as f:
-            json.dump(val_data, f, indent=2)
-            
-        train_files.append(train_file)
-        val_files.append(val_file)
-        
-        print(f"Split {os.path.basename(chunk_file)}:")
-        print(f"  Train: {len(train_data['images'])} images, {len(train_data['annotations'])} annotations")
-        print(f"  Val: {len(val_data['images'])} images, {len(val_data['annotations'])} annotations")
-    
-    return train_files, val_files 
+    return chunk_dirs 
