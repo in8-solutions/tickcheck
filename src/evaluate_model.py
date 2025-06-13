@@ -427,11 +427,11 @@ if __name__ == '__main__':
     in different scenarios.
     ''')
     
-    parser.add_argument('--model', default='checkpoints/best_model.pth',
+    parser.add_argument('--model', default='outputs/training/checkpoints/latest_model.pth',
                       help='Path to trained model checkpoint')
     parser.add_argument('--input', default='test_images',
                       help='Directory containing test images')
-    parser.add_argument('--output', default='evaluation_results',
+    parser.add_argument('--output', default='outputs/evaluation',
                       help='Directory to save results')
     parser.add_argument('--threshold', type=float, default=0.5,
                       help='Confidence threshold for detections (0.0 to 1.0)')

@@ -18,7 +18,7 @@ training:
   # Basic training parameters
   num_epochs: 100          # Increased from 50
   batch_size: 7           # Reduced from 8 to avoid OOM during IoU calculations
-  learning_rate: 0.0001   # Slightly lower initial learning rate
+  learning_rate: 0.0001   # Initial learning rate
   weight_decay: 0.0001
   
   # Early stopping parameters
@@ -26,9 +26,11 @@ training:
   patience: 10            # More patience before early stopping
   
   # Learning rate scheduling
-  lr_scheduler: "cosine"  # Cosine annealing
-  warmup_epochs: 5        # Gradual warmup
-  min_lr: 0.000001       # Minimum learning rate
+  lr_scheduler:
+    name: "reduce_on_plateau"
+    factor: 0.5           # Reduce LR by 50% (was 0.1)
+    patience: 8           # Wait 8 epochs before reducing LR (was 5)
+    min_lr: 0.00001      # Don't reduce LR below this (was 0.000001)
   
   # Data loading
   num_workers: 4

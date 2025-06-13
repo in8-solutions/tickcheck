@@ -31,6 +31,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 import sys
+import traceback
 
 from utils import load_config, create_directories, collate_fn, AverageMeter, save_checkpoint
 from dataset import DetectionDataset, get_transform
@@ -301,8 +302,8 @@ def main():
             'train_loss': [],
             'val_loss': [],
             'learning_rates': [],
-            'best_val_loss': float('inf'),
-            'epochs_without_improvement': 0
+            'epochs_without_improvement': 0,
+            'best_val_loss': float('inf')
         }
         
         # Set device and optimize CUDA settings
@@ -330,6 +331,7 @@ def main():
         val_transform = get_transform(config, train=False)
         
         # Create dataset
+        print("Loading dataset...")
         full_dataset = DetectionDataset(
             config['data']['train_path'],
             config['data']['train_annotations'],
@@ -347,7 +349,7 @@ def main():
         train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
         
         # Update val_dataset transform
-        val_dataset.dataset.dataset.transforms = val_transform  # Note: double dataset due to Subset + random_split
+        val_dataset.dataset.dataset.transforms = val_transform
         
         # DataLoader settings
         loader_kwargs = {
@@ -359,10 +361,12 @@ def main():
             'persistent_workers': config['training']['persistent_workers']
         }
         
+        print("Creating data loaders...")
         # Create data loaders
         train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
         val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
         
+        print("Creating model...")
         # Create model
         model = create_model(config)
         
@@ -373,6 +377,7 @@ def main():
         # Move model to device
         model = model.to(device)
         
+        print("Setting up optimizer and scheduler...")
         # Create optimizer
         params = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.AdamW(
@@ -380,6 +385,22 @@ def main():
             lr=config['training']['learning_rate'],
             weight_decay=config['training']['weight_decay']
         )
+
+        # Create learning rate scheduler
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=0.5,
+            patience=8,
+            min_lr=0.00001
+        )
+        
+        # Print scheduler info
+        print(f"Learning rate scheduler: ReduceLROnPlateau")
+        print(f"- Mode: min (reduce LR when validation loss plateaus)")
+        print(f"- Factor: 0.5 (reduce LR by 50%)")
+        print(f"- Patience: 8 epochs")
+        print(f"- Minimum LR: {0.00001}")
         
         # Initialize gradient scaler for mixed precision training
         if config['training'].get('mixed_precision', False) and device.type == 'cuda':
@@ -392,6 +413,12 @@ def main():
         min_epochs = 1 if QUICK_TEST else config['training'].get('min_epochs', 20)
         patience = 1 if QUICK_TEST else config['training'].get('patience', 5)
         num_epochs = 1 if QUICK_TEST else config['training']['num_epochs']
+        
+        print(f"\nStarting training for {num_epochs} epochs...")
+        print(f"Min epochs: {min_epochs}")
+        print(f"Early stopping patience: {patience}")
+        print(f"Initial learning rate: {config['training']['learning_rate']}")
+        print(f"Batch size: {config['training']['batch_size']}")
         
         for epoch in range(num_epochs):
             print(f'\nEpoch {epoch + 1}/{num_epochs}')
@@ -453,6 +480,9 @@ def main():
             print(f'Val Loss: {val_loss:.4f}')
             print(f'Learning Rate: {current_lr:.6f}')
             
+            # Update learning rate scheduler
+            scheduler.step(val_loss)
+            
             # Plot and save training curves after each epoch
             plot_training_curves(history, config['training']['output_dir'])
             
@@ -476,30 +506,34 @@ def main():
                 print(f'\nEarly stopping triggered. No improvement for {patience} epochs.')
                 break
         
-        # Plot training curves
+        # Plot final training curves
         plot_training_curves(history, config['training']['output_dir'])
         
         print('\nTraining completed!')
         print(f'Best validation loss: {best_val_loss:.4f}')
         
+    except Exception as e:
+        print(f"\nError during training: {str(e)}")
+        print("\nTraceback:")
+        traceback.print_exc()
+        raise e
     finally:
+        print("\nCleaning up...")
         # Cleanup
         if 'train_loader' in locals():
             del train_loader
         if 'val_loader' in locals():
             del val_loader
         if 'model' in locals():
-            model.cpu()
+            if isinstance(model, torch.nn.Module):
+                model.cpu()
             del model
         if 'optimizer' in locals():
             del optimizer
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
-        # Force close the workers
-        if torch.multiprocessing.current_process().daemon:
-            os._exit(0)
-        else:
-            sys.exit(0)
+        print("Cleanup complete.")
 
 if __name__ == '__main__':
     main() 
