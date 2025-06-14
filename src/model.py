@@ -88,8 +88,8 @@ class TickDetector(nn.Module):
         
         # Create the internal RetinaNet model with COCO weights
         self.model = retinanet_resnet50_fpn(
-            weights=RetinaNet_ResNet50_FPN_Weights.COCO_V1,
-            num_classes=91,  # COCO has 91 classes
+            weights=None,  # Don't use pretrained weights initially
+            num_classes=2,  # Our 2 classes: background and tick
             min_size=config['model']['min_size'],
             max_size=config['model']['max_size'],
             box_score_thresh=config['model']['box_score_thresh'],
@@ -123,7 +123,7 @@ class TickDetector(nn.Module):
             images (List[Tensor]): List of images to process
             targets (List[Dict], optional): List of target dictionaries containing:
                 - boxes (Tensor[N, 4]): Ground truth boxes in [x1, y1, x2, y2] format
-                - labels (Tensor[N]): Class labels for each box
+                - labels (Tensor[N]): Class labels for each box (0 for background, 1 for tick)
                 
         Returns:
             During training:

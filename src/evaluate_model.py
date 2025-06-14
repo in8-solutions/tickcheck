@@ -83,6 +83,8 @@ class ModelEvaluator:
         # Initialize metrics storage
         self.all_predictions = []
         self.all_targets = []
+        self.negative_examples = 0  # Count of images with no detections
+        self.positive_examples = 0  # Count of images with detections
     
     def predict_image(self, image_path):
         """Run prediction on a single image."""
@@ -124,8 +126,16 @@ class ModelEvaluator:
             labels = predictions['labels']
             
             # Update statistics
-            total_detections += len(boxes)
-            detection_counts.append(len(boxes))
+            num_detections = len(boxes)
+            total_detections += num_detections
+            detection_counts.append(num_detections)
+            
+            # Update positive/negative counts
+            if num_detections > 0:
+                self.positive_examples += 1
+            else:
+                self.negative_examples += 1
+            
             if isinstance(scores, torch.Tensor):
                 confidence_scores.extend(scores.cpu().numpy().tolist())
             else:
@@ -145,8 +155,8 @@ class ModelEvaluator:
 
     def visualize_predictions(self, image_path, boxes, scores, labels, output_path):
         """Draw bounding boxes on image and save."""
-        # Load image
-        image = Image.open(image_path)
+        # Load image and convert to RGB
+        image = Image.open(image_path).convert('RGB')
         draw = ImageDraw.Draw(image)
         
         # Convert scores to numpy array if it's a tensor
@@ -174,15 +184,18 @@ class ModelEvaluator:
         
         # Calculate detection distribution
         detection_ranges = {
-            '0-1': 0,
+            '0': 0,  # No detections (negative examples)
+            '1': 0,  # Single detection
             '2-5': 0,
             '6-10': 0,
             '>10': 0
         }
         
         for count in detection_counts:
-            if count <= 1:
-                detection_ranges['0-1'] += 1
+            if count == 0:
+                detection_ranges['0'] += 1
+            elif count == 1:
+                detection_ranges['1'] += 1
             elif count <= 5:
                 detection_ranges['2-5'] += 1
             elif count <= 10:
@@ -219,7 +232,10 @@ class ModelEvaluator:
             'total_detections': total_detections,
             'average_detections_per_image': avg_detections,
             'detection_distribution': detection_ranges,
-            'confidence_distribution': confidence_ranges
+            'confidence_distribution': confidence_ranges,
+            'negative_examples': self.negative_examples,
+            'positive_examples': self.positive_examples,
+            'negative_example_percentage': (self.negative_examples / total_images * 100) if total_images > 0 else 0
         }
         
         report_path = os.path.join(output_dir, 'evaluation_report.json')
@@ -235,6 +251,8 @@ class ModelEvaluator:
         print(f"Total Images Processed: {total_images}")
         print(f"Total Detections: {total_detections}")
         print(f"Average Detections per Image: {avg_detections:.2f}")
+        print(f"Negative Examples (No Detections): {self.negative_examples} ({metrics['negative_example_percentage']:.1f}%)")
+        print(f"Positive Examples (With Detections): {self.positive_examples} ({100 - metrics['negative_example_percentage']:.1f}%)")
         
         print("\nDetection Distribution:")
         for range_name, count in detection_ranges.items():

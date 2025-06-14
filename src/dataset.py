@@ -10,6 +10,7 @@ Key Features:
 - Handles bounding box normalization
 - Provides configurable data augmentation
 - Supports both training and inference transformations
+- Properly handles negative examples (images without ticks)
 """
 
 import os
@@ -29,6 +30,7 @@ class DetectionDataset(Dataset):
     2. Converting bounding box formats
     3. Applying transformations and augmentations
     4. Preparing data in the format expected by the model
+    5. Handling negative examples (images without ticks)
     
     Args:
         image_dir (str): Directory containing the images
@@ -147,11 +149,8 @@ class DetectionDataset(Dataset):
                 # Map category ID to ensure it starts from 1
                 category_id = ann['category_id']
                 labels.append(self.cat_mapping.get(category_id, 1))  # Default to 1 if not found
-            
-        if not boxes:  # If no valid boxes, create a dummy box
-            boxes = [[0, 0, width, height]]
-            labels = [1]
-            
+        
+        # Convert to tensors
         boxes = np.array(boxes, dtype=np.float32)
         labels = np.array(labels, dtype=np.int64)
         
@@ -171,7 +170,7 @@ class DetectionDataset(Dataset):
             'boxes': boxes,
             'labels': labels,
             'image_id': torch.tensor([image_id]),
-            'area': torch.tensor([(box[2] - box[0]) * (box[3] - box[1]) for box in boxes], dtype=torch.float32),
+            'area': torch.tensor([(box[2] - box[0]) * (box[3] - box[1]) for box in boxes], dtype=torch.float32) if len(boxes) > 0 else torch.tensor([], dtype=torch.float32),
             'iscrowd': torch.zeros((len(boxes),), dtype=torch.int64)
         }
         
