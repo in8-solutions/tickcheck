@@ -203,55 +203,55 @@ class AverageMeter:
         self.avg = self.sum / self.count 
 
 def plot_training_curves(history, output_dir):
-    """Plot and save training progress curves.
-    
-    Creates visualization of:
-    1. Training and validation loss curves
-    2. Learning rate schedule
-    3. Saves both plot and raw data
-    
-    Args:
-        history (dict): Training history containing metrics
-        output_dir (str): Directory to save outputs
-    """
+    """Plot training curves and save to file."""
     plt.figure(figsize=(12, 8))
-    plt.subplot(2, 1, 1)
-    plt.plot(history['train_loss'], label='Training Loss')
-    plt.plot(history['val_loss'], label='Validation Loss')
-    plt.title('Model Loss Over Time')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.grid(True)
-
-    # Plot learning rate
-    plt.subplot(2, 1, 2)
-    plt.plot(history['learning_rates'], label='Learning Rate')
-    plt.title('Learning Rate Over Time')
-    plt.xlabel('Epoch')
-    plt.ylabel('Learning Rate')
-    plt.yscale('log')
-    plt.grid(True)
-    plt.legend()
-
-    plt.tight_layout()
     
-    # Save the plot
-    curves_dir = os.path.join(output_dir, 'training_curves')
-    os.makedirs(curves_dir, exist_ok=True)  # Ensure directory exists
-    plt.savefig(os.path.join(curves_dir, 'training_curves.png'), dpi=300, bbox_inches='tight')
+    # Create two subplots with different y-axis scales
+    gs = plt.GridSpec(2, 1, height_ratios=[1, 3])
+    ax1 = plt.subplot(gs[0])
+    ax2 = plt.subplot(gs[1])
+    
+    # Plot first epoch separately with different scale
+    epochs = range(1, len(history['train_loss']) + 1)
+    ax1.plot([1], [history['train_loss'][0]], 'b-', label='Training Loss')
+    ax1.plot([1], [history['val_loss'][0]], 'r-', label='Validation Loss')
+    ax1.set_ylabel('Loss (First Epoch)')
+    ax1.set_title('Training and Validation Loss')
+    ax1.legend()
+    ax1.grid(True)
+    
+    # Plot remaining epochs with appropriate scale
+    ax2.plot(epochs[1:], history['train_loss'][1:], 'b-', label='Training Loss')
+    ax2.plot(epochs[1:], history['val_loss'][1:], 'r-', label='Validation Loss')
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Loss')
+    ax2.legend()
+    ax2.grid(True)
+    
+    # Add a break in the y-axis
+    ax1.spines['bottom'].set_visible(False)
+    ax2.spines['top'].set_visible(False)
+    ax1.xaxis.tick_top()
+    ax1.tick_params(labeltop=False)
+    ax2.xaxis.tick_bottom()
+    
+    # Add the break mark
+    d = .015  # how big to make the diagonal lines in axes coordinates
+    kwargs = dict(transform=ax1.transAxes, color='k', clip_on=False)
+    ax1.plot((-d, +d), (-d, +d), **kwargs)        # top-left diagonal
+    ax1.plot((1 - d, 1 + d), (-d, +d), **kwargs)  # top-right diagonal
+    kwargs.update(transform=ax2.transAxes)  # switch to the bottom axes
+    ax2.plot((-d, +d), (1 - d, 1 + d), **kwargs)  # bottom-left diagonal
+    ax2.plot((1 - d, 1 + d), (1 - d, 1 + d), **kwargs)  # bottom-right diagonal
+    
+    # Adjust layout and save
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'training_curves.png'))
     plt.close()
-
-    # Save raw data for future reference
-    with open(os.path.join(curves_dir, 'training_history.json'), 'w') as f:
-        json.dump({
-            'train_loss': history['train_loss'],
-            'val_loss': history['val_loss'],
-            'learning_rates': history['learning_rates'],
-            'epochs': len(history['train_loss']),
-            'best_val_loss': min(history['val_loss']),
-            'best_epoch': history['val_loss'].index(min(history['val_loss'])) + 1
-        }, f, indent=4)
+    
+    # Save raw data
+    with open(os.path.join(output_dir, 'training_history.json'), 'w') as f:
+        json.dump(history, f, indent=4)
 
 def split_coco_annotations(annotation_file: str, 
                          chunk_size: int = 1000,

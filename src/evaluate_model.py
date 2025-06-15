@@ -40,6 +40,7 @@ from utils import load_config
 from transforms import get_transform
 from model import create_model
 from torchvision.transforms import functional as F
+from dataset import DetectionDataset
 
 class ModelEvaluator:
     """
@@ -65,7 +66,7 @@ class ModelEvaluator:
         self.confidence_threshold = confidence_threshold
         
         # Load configuration for transforms
-        config_path = 'config.yaml'  # Updated to use top-level config
+        config_path = 'config.yaml'
         self.config = load_config(config_path)
         
         # Create model with our configuration
@@ -81,16 +82,25 @@ class ModelEvaluator:
         self.transform = get_transform(self.config, train=False, inference_only=True)
         
         # Initialize metrics storage
-        self.all_predictions = []
-        self.all_targets = []
-        self.negative_examples = 0  # Count of images with no detections
-        self.positive_examples = 0  # Count of images with detections
+        self.metrics = {
+            'with_ticks': {
+                'true_positives': 0,
+                'false_negatives': 0,
+                'false_positives': 0,
+                'total_ground_truth': 0
+            },
+            'without_ticks': {
+                'false_positives': 0,
+                'total_images': 0
+            }
+        }
     
     def predict_image(self, image_path):
         """Run prediction on a single image."""
         # Load and preprocess image
         image = Image.open(image_path).convert('RGB')
-        image_np = np.array(image)  # Convert PIL Image to numpy array
+        image_np = np.array(image)
+        img_height, img_width = image_np.shape[:2]
         
         # Apply transforms
         transformed = self.transform(image=image_np)
@@ -99,25 +109,51 @@ class ModelEvaluator:
         # Move to device
         image_tensor = image_tensor.to(self.device)
         
-        # Get predictions - pass as a list of images
+        # Get predictions
         with torch.no_grad():
             predictions = self.model([image_tensor])
         
-        return predictions[0]  # Remove batch dimension
+        # Filter predictions to only include tick class (class 1)
+        pred = predictions[0]
+        tick_mask = pred['labels'] == 1  # Only keep tick class
+        filtered_pred = {
+            'boxes': pred['boxes'][tick_mask],
+            'scores': pred['scores'][tick_mask],
+            'labels': pred['labels'][tick_mask]
+        }
         
-    def evaluate_directory(self, input_dir, output_dir):
+        # Scale box coordinates back to original image size
+        scale_x = img_width / self.config['data']['input_size'][1]
+        scale_y = img_height / self.config['data']['input_size'][0]
+        
+        filtered_pred['boxes'][:, 0] = filtered_pred['boxes'][:, 0] * scale_x
+        filtered_pred['boxes'][:, 1] = filtered_pred['boxes'][:, 1] * scale_y
+        filtered_pred['boxes'][:, 2] = filtered_pred['boxes'][:, 2] * scale_x
+        filtered_pred['boxes'][:, 3] = filtered_pred['boxes'][:, 3] * scale_y
+        
+        return filtered_pred
+    
+    def get_image_files(self, directory):
+        """Recursively get all image files from a directory and its subdirectories."""
+        image_files = []
+        for root, _, files in os.walk(directory):
+            for file in files:
+                if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    image_files.append(os.path.join(root, file))
+        return image_files
+    
+    def evaluate_directory(self, input_dir, output_dir, is_with_ticks=True):
         """Evaluate model on all images in a directory."""
         os.makedirs(output_dir, exist_ok=True)
         
-        image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-        total_detections = 0
-        detection_counts = []
-        confidence_scores = []
+        # Get all image files recursively
+        image_files = self.get_image_files(input_dir)
         
-        # Process images with progress bar
-        for image_file in tqdm(image_files, desc="Processing images"):
-            image_path = os.path.join(input_dir, image_file)
-            output_path = os.path.join(output_dir, f"pred_{image_file}")
+        for image_path in tqdm(image_files, desc=f"Processing {'with_ticks' if is_with_ticks else 'without_ticks'} images"):
+            # Create output path preserving subdirectory structure
+            rel_path = os.path.relpath(image_path, input_dir)
+            output_path = os.path.join(output_dir, f"pred_{rel_path}")
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
             # Get predictions
             predictions = self.predict_image(image_path)
@@ -125,161 +161,150 @@ class ModelEvaluator:
             scores = predictions['scores']
             labels = predictions['labels']
             
-            # Update statistics
-            num_detections = len(boxes)
-            total_detections += num_detections
-            detection_counts.append(num_detections)
+            # Filter predictions by confidence
+            mask = scores >= self.confidence_threshold
+            boxes = boxes[mask].cpu().numpy()
+            scores = scores[mask].cpu().numpy()
             
-            # Update positive/negative counts
-            if num_detections > 0:
-                self.positive_examples += 1
+            # Update metrics
+            if is_with_ticks:
+                # For with_ticks images, we expect at least one detection
+                self.metrics['with_ticks']['total_ground_truth'] += 1
+                if len(boxes) > 0:
+                    self.metrics['with_ticks']['true_positives'] += 1
+                else:
+                    self.metrics['with_ticks']['false_negatives'] += 1
             else:
-                self.negative_examples += 1
-            
-            if isinstance(scores, torch.Tensor):
-                confidence_scores.extend(scores.cpu().numpy().tolist())
-            else:
-                confidence_scores.extend(scores)
+                # For without_ticks images, any detection is a false positive
+                self.metrics['without_ticks']['total_images'] += 1
+                if len(boxes) > 0:
+                    self.metrics['without_ticks']['false_positives'] += 1
             
             # Save visualization
-            self.visualize_predictions(image_path, boxes, scores, labels, output_path)
+            self.visualize_predictions(image_path, boxes, scores, output_path)
+    
+    def calculate_iou(self, box1, box2):
+        """Calculate Intersection over Union between two boxes."""
+        # Convert to [x1, y1, x2, y2] format
+        box1 = [box1[0], box1[1], box1[0] + box1[2], box1[1] + box1[3]]
+        box2 = [box2[0], box2[1], box2[0] + box2[2], box2[1] + box2[3]]
         
-        # Generate and save report
-        self.generate_report(
-            total_images=len(image_files),
-            total_detections=total_detections,
-            detection_counts=detection_counts,
-            confidence_scores=confidence_scores,
-            output_dir=output_dir
-        )
-
-    def visualize_predictions(self, image_path, boxes, scores, labels, output_path):
+        # Calculate intersection
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        
+        if x2 < x1 or y2 < y1:
+            return 0.0
+        
+        intersection = (x2 - x1) * (y2 - y1)
+        
+        # Calculate union
+        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union = box1_area + box2_area - intersection
+        
+        return intersection / union if union > 0 else 0.0
+    
+    def visualize_predictions(self, image_path, boxes, scores, output_path):
         """Draw bounding boxes on image and save."""
-        # Load image and convert to RGB
         image = Image.open(image_path).convert('RGB')
         draw = ImageDraw.Draw(image)
         
-        # Convert scores to numpy array if it's a tensor
-        if isinstance(scores, torch.Tensor):
-            scores = scores.cpu().numpy()
+        # Get image dimensions
+        img_width, img_height = image.size
         
-        # Filter predictions by confidence
-        mask = scores >= self.confidence_threshold
-        boxes = boxes[mask].cpu().numpy()
-        scores = scores[mask]
+        # Convert boxes to integers and clamp to image boundaries
+        boxes = boxes.astype(int)
+        boxes[:, 0] = np.clip(boxes[:, 0], 0, img_width)   # x1
+        boxes[:, 1] = np.clip(boxes[:, 1], 0, img_height)  # y1
+        boxes[:, 2] = np.clip(boxes[:, 2], 0, img_width)   # x2
+        boxes[:, 3] = np.clip(boxes[:, 3], 0, img_height)  # y2
         
-        # Draw each box
-        for box, score in zip(boxes, scores):
+        # Draw each box with a different color based on confidence
+        for i, (box, score) in enumerate(zip(boxes, scores)):
             x1, y1, x2, y2 = box
-            draw.rectangle([x1, y1, x2, y2], outline='red', width=2)
-            draw.text((x1, y1-10), f'{score:.2f}', fill='red')
-        
-        # Save image
-        image.save(output_path)
-
-    def generate_report(self, total_images, total_detections, detection_counts, confidence_scores, output_dir):
-        """Calculate and save evaluation metrics."""
-        # Calculate metrics
-        avg_detections = total_detections / total_images if total_images > 0 else 0
-        
-        # Calculate detection distribution
-        detection_ranges = {
-            '0': 0,  # No detections (negative examples)
-            '1': 0,  # Single detection
-            '2-5': 0,
-            '6-10': 0,
-            '>10': 0
-        }
-        
-        for count in detection_counts:
-            if count == 0:
-                detection_ranges['0'] += 1
-            elif count == 1:
-                detection_ranges['1'] += 1
-            elif count <= 5:
-                detection_ranges['2-5'] += 1
-            elif count <= 10:
-                detection_ranges['6-10'] += 1
+            # Use different colors based on confidence
+            if score > 0.7:
+                color = 'red'
+            elif score > 0.5:
+                color = 'orange'
             else:
-                detection_ranges['>10'] += 1
+                color = 'yellow'
+            
+            # Draw box with thicker line
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=4)
+            # Draw score with larger font
+            draw.text((x1, y1-20), f'{score:.2f}', fill=color, font=None, font_size=24)
         
-        # Calculate confidence distribution
-        confidence_ranges = {
-            '0.5-0.6': 0,
-            '0.6-0.7': 0,
-            '0.7-0.8': 0,
-            '0.8-0.9': 0,
-            '0.9-1.0': 0
-        }
-        
-        for score in confidence_scores:
-            if score >= 0.5:
-                if score < 0.6:
-                    confidence_ranges['0.5-0.6'] += 1
-                elif score < 0.7:
-                    confidence_ranges['0.6-0.7'] += 1
-                elif score < 0.8:
-                    confidence_ranges['0.7-0.8'] += 1
-                elif score < 0.9:
-                    confidence_ranges['0.8-0.9'] += 1
-                else:
-                    confidence_ranges['0.9-1.0'] += 1
-        
-        # Save metrics to JSON file
-        metrics = {
-            'confidence_threshold': self.confidence_threshold,
-            'total_images': total_images,
-            'total_detections': total_detections,
-            'average_detections_per_image': avg_detections,
-            'detection_distribution': detection_ranges,
-            'confidence_distribution': confidence_ranges,
-            'negative_examples': self.negative_examples,
-            'positive_examples': self.positive_examples,
-            'negative_example_percentage': (self.negative_examples / total_images * 100) if total_images > 0 else 0
-        }
-        
-        report_path = os.path.join(output_dir, 'evaluation_report.json')
-        with open(report_path, 'w') as f:
-            json.dump(metrics, f, indent=2)
-        
-        # Print human-readable report
-        print("\n" + "="*50)
-        print("EVALUATION REPORT")
-        print("="*50)
-        print(f"\nModel Evaluation Summary:")
-        print(f"Confidence Threshold: {self.confidence_threshold:.2f}")
-        print(f"Total Images Processed: {total_images}")
-        print(f"Total Detections: {total_detections}")
-        print(f"Average Detections per Image: {avg_detections:.2f}")
-        print(f"Negative Examples (No Detections): {self.negative_examples} ({metrics['negative_example_percentage']:.1f}%)")
-        print(f"Positive Examples (With Detections): {self.positive_examples} ({100 - metrics['negative_example_percentage']:.1f}%)")
-        
-        print("\nDetection Distribution:")
-        for range_name, count in detection_ranges.items():
-            percentage = (count / total_images * 100) if total_images > 0 else 0
-            print(f"  {range_name} detections: {count} images ({percentage:.1f}%)")
-        
-        print("\nConfidence Distribution:")
-        for range_name, count in confidence_ranges.items():
-            percentage = (count / total_detections * 100) if total_detections > 0 else 0
-            print(f"  {range_name}: {count} detections ({percentage:.1f}%)")
-        
-        print("\n" + "="*50)
-        print(f"Full report saved to: {report_path}")
-        print("="*50 + "\n")
-
-def evaluate_directory(model_path, input_dir, output_dir, confidence_threshold=0.5):
-    """Evaluate a directory of images."""
-    evaluator = ModelEvaluator(model_path, confidence_threshold=confidence_threshold)
-    evaluator.evaluate_directory(input_dir, output_dir)
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate a trained model on images")
-    parser.add_argument("--model", required=True, help="Path to the trained model checkpoint")
-    parser.add_argument("--input", required=True, help="Path to input directory containing images")
-    parser.add_argument("--output", required=True, help="Path to output directory for results")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Confidence threshold for detections")
+        # Save with high quality
+        image.save(output_path, quality=95)
     
+    def generate_report(self, output_dir):
+        """Generate and save evaluation report."""
+        # Calculate metrics
+        with_ticks = self.metrics['with_ticks']
+        without_ticks = self.metrics['without_ticks']
+        
+        # Calculate precision and recall for with_ticks
+        precision = with_ticks['true_positives'] / (with_ticks['true_positives'] + with_ticks['false_positives']) if (with_ticks['true_positives'] + with_ticks['false_positives']) > 0 else 0
+        recall = with_ticks['true_positives'] / with_ticks['total_ground_truth'] if with_ticks['total_ground_truth'] > 0 else 0
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        
+        # Calculate false positive rate for without_ticks
+        fpr = without_ticks['false_positives'] / without_ticks['total_images'] if without_ticks['total_images'] > 0 else 0
+        
+        # Generate report
+        report = f"""
+==================================================
+EVALUATION REPORT
+==================================================
+
+Confidence Threshold: {self.confidence_threshold:.2f}
+
+With Ticks Images:
+Total Ground Truth Ticks: {with_ticks['total_ground_truth']}
+True Positives: {with_ticks['true_positives']}
+False Positives: {with_ticks['false_positives']}
+False Negatives: {with_ticks['false_negatives']}
+Precision: {precision:.4f}
+Recall: {recall:.4f}
+F1 Score: {f1:.4f}
+
+Without Ticks Images:
+Total Images: {without_ticks['total_images']}
+False Positives: {without_ticks['false_positives']}
+False Positive Rate: {fpr:.4f}
+"""
+        
+        # Save report
+        report_path = os.path.join(output_dir, 'evaluation_report.txt')
+        with open(report_path, 'w') as f:
+            f.write(report)
+        
+        # Print report
+        print(report)
+
+def main():
+    parser = argparse.ArgumentParser(description='Evaluate object detection model')
+    parser.add_argument('--model', type=str, required=True, help='Path to model checkpoint')
+    parser.add_argument('--input', type=str, nargs='+', required=True, help='Input directories containing images')
+    parser.add_argument('--output', type=str, required=True, help='Output directory for visualizations')
+    parser.add_argument('--threshold', type=float, default=0.5, help='Confidence threshold for detections')
     args = parser.parse_args()
     
-    evaluate_directory(args.model, args.input, args.output, args.threshold) 
+    # Create evaluator
+    evaluator = ModelEvaluator(args.model, args.threshold)
+    
+    # Process each input directory
+    for input_dir in args.input:
+        is_with_ticks = 'with_ticks' in input_dir
+        output_dir = os.path.join(args.output, 'with_ticks' if is_with_ticks else 'without_ticks')
+        evaluator.evaluate_directory(input_dir, output_dir, is_with_ticks)
+    
+    # Generate final report
+    evaluator.generate_report(args.output)
+
+if __name__ == '__main__':
+    main() 

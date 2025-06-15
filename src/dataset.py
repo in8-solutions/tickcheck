@@ -96,11 +96,11 @@ class DetectionDataset(Dataset):
         
         # Create category mapping if categories are provided
         if isinstance(self.annotations, dict) and 'categories' in self.annotations:
-            # Ensure category IDs start from 1 (0 is reserved for background)
-            self.cat_mapping = {cat['id']: cat['id'] for cat in self.annotations['categories']}
+            # Map category IDs to start from 0 (tick class)
+            self.cat_mapping = {cat['id']: 0 for cat in self.annotations['categories']}
         else:
-            # If no categories provided, assume all annotations are for class 1 (tick)
-            self.cat_mapping = {1: 1}
+            # If no categories provided, assume all annotations are for class 0 (tick)
+            self.cat_mapping = {1: 0}
         
         self.image_info = {img['id']: img for img in self.annotations['images']}
     
@@ -146,9 +146,9 @@ class DetectionDataset(Dataset):
             # Only add box if it's valid
             if x1 < x2 and y1 < y2 and (x2 - x1) > 1 and (y2 - y1) > 1:
                 boxes.append([x1, y1, x2, y2])
-                # Map category ID to ensure it starts from 1
+                # Map category ID to ensure it's 0 for ticks
                 category_id = ann['category_id']
-                labels.append(self.cat_mapping.get(category_id, 1))  # Default to 1 if not found
+                labels.append(0)  # All valid boxes are ticks (class 0)
         
         # Convert to tensors
         boxes = np.array(boxes, dtype=np.float32)

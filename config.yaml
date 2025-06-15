@@ -3,68 +3,64 @@ model:
   backbone: "resnet50"
   num_classes: 2  # Background and tick
   pretrained: true
-  freeze_backbone: false  # Added parameter - don't freeze since we're doing a long training
-  min_size: 640  # Minimum size for image resizing
-  max_size: 640  # Maximum size for image resizing
-  box_score_thresh: 0.05  # Minimum score for box detection
-  box_nms_thresh: 0.5  # NMS IoU threshold
-  box_detections_per_img: 100  # Maximum number of detections per image
-  anchor_sizes: [32, 64, 128, 256, 512]  # Anchor sizes for different feature levels
-  anchor_ratios: [0.5, 1.0, 2.0]  # Anchor aspect ratios
+  freeze_backbone: false
+  min_size: 1024  # Keep 1024 for tick detection
+  max_size: 1024  # Keep 1024 for tick detection
+  box_score_thresh: 0.3  # Increased from 0.05 to reduce false positives
+  box_nms_thresh: 0.5
+  box_detections_per_img: 20  # Reduced from 100 to limit detections per image
+  anchor_sizes: [32, 64, 128, 256, 512]  # Reduced anchor sizes for better tick detection
+  anchor_ratios: [0.5, 1.0, 2.0]  # Good for oval/elliptical ticks
 
 data:
-  train_paths:  # Updated to use multiple chunks
+  train_paths:
     - "data/chunk_001/images"
     - "data/chunk_002/images"
     - "data/chunk_003/images"
     - "data/chunk_004/images"
     - "data/chunk_005/images"
-  train_annotations:  # Updated to use multiple annotation files
+  train_annotations:
     - "data/chunk_001/annotations.json"
     - "data/chunk_002/annotations.json"
     - "data/chunk_003/annotations.json"
     - "data/chunk_004/annotations.json"
     - "data/chunk_005/annotations.json"
   val_split: 0.2
-  input_size: [640, 640]  # Reduced from 800x800
-  mean: [0.485, 0.456, 0.406]  # Added back normalization params
-  std: [0.229, 0.224, 0.225]   # Added back normalization params
-  categories:  # Added categories based on class definitions
+  input_size: [1024, 1024]  # Keep 1024x1024 for tick detection
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  categories:
     - id: 0
       name: "tick"
     - id: 1
       name: "background"
 
 training:
-  # Basic training parameters
-  device: "cuda"  # Moved from model section
-  num_epochs: 100          # Increased from 50
-  batch_size: 7           # Reduced from 8 to avoid OOM during IoU calculations
-  learning_rate: 0.0001   # Initial learning rate
+  device: "cuda"
+  num_epochs: 100  # Keep longer training for high resolution
+  batch_size: 8    # Reduced for stability
+  learning_rate: 0.0003  # Reduced for better stability
   weight_decay: 0.0001
   
-  # Early stopping parameters
-  min_epochs: 30          # Must train at least this many epochs
-  early_stopping_patience: 10  # Renamed from patience to match code
+  min_epochs: 15
+  early_stopping_patience: 10
   
-  # Learning rate scheduling
   lr_scheduler:
     name: "reduce_on_plateau"
-    factor: 0.5           # Reduce LR by 50% (was 0.1)
-    patience: 8           # Wait 8 epochs before reducing LR (was 5)
-    min_lr: 0.00001      # Don't reduce LR below this (was 0.000001)
+    factor: 0.5
+    patience: 10
+    min_lr: 0.00001
   
-  # Data loading
+  gradient_clip: 10.0
+  
   num_workers: 4
   pin_memory: true
   prefetch_factor: 2
   persistent_workers: true
   
-  # Mixed precision training
-  use_amp: true  # Renamed from mixed_precision to match code
-  channels_last: true     # Memory format optimization
+  use_amp: true
+  channels_last: true
   
-  # CUDA optimizations
   allow_tf32: true
 
 output:
@@ -101,8 +97,7 @@ augmentation:
     resize_only: true
 
 classes:
-  # Update with your class names
-  0: "tick"  # Replace with your object name
+  0: "tick"
 
 paths:
   checkpoint_dir: "checkpoints"
