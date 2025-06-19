@@ -39,7 +39,7 @@ training:
   # Basic training parameters
   device: "cuda"  # Moved from model section
   num_epochs: 100          # Increased from 50
-  batch_size: 7           # Reduced from 8 to avoid OOM during IoU calculations
+  batch_size: 7           # Reduced from 7 to lower VRAM usage
   learning_rate: 0.0001   # Increased from 0.00001 to a more appropriate value for RetinaNet
   weight_decay: 0.001     # Increased from 0.0001 for stronger regularization
   
@@ -55,10 +55,10 @@ training:
     min_lr: 0.00001       # Increased from 0.000001 to maintain higher minimum learning rate
   
   # Data loading
-  num_workers: 12
+  num_workers: 4  # Reduced from 12 to minimize multiprocessing issues
   pin_memory: true
   prefetch_factor: 2
-  persistent_workers: true
+  persistent_workers: false  # Disabled to reduce multiprocessing complexity
   
   # Mixed precision training
   use_amp: true  # Renamed from mixed_precision to match code
