@@ -39,7 +39,7 @@ training:
   # Basic training parameters
   device: "cuda"  # Moved from model section
   num_epochs: 100          # Increased from 50
-  batch_size: 7           # Reduced from 8 to avoid OOM during IoU calculations
+  batch_size: 6           # Reduced from 7 to lower VRAM usage
   learning_rate: 0.0001   # Increased from 0.00001 to a more appropriate value for RetinaNet
   weight_decay: 0.001     # Increased from 0.0001 for stronger regularization
   

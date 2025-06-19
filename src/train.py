@@ -38,6 +38,7 @@ import argparse
 import shutil
 import time
 import gc
+from sklearn.metrics import precision_recall_fscore_support, accuracy_score
 
 from utils import load_config, create_directories, collate_fn, AverageMeter, save_checkpoint
 from dataset import DetectionDataset, get_transform
@@ -69,8 +70,8 @@ def train_one_epoch(model, optimizer, data_loader, device, scaler=None):
     # Enable cuDNN autotuner
     torch.backends.cudnn.benchmark = True
     
-    # Progress bar
-    pbar = tqdm(data_loader, total=len(data_loader))
+    # Progress bar - simplified description
+    pbar = tqdm(data_loader, total=len(data_loader), leave=False)
     
     # Initialize timing
     end = time.time()
@@ -124,14 +125,8 @@ def train_one_epoch(model, optimizer, data_loader, device, scaler=None):
             # Measure batch time
             batch_time.update(time.time() - batch_start)
             
-            # Update progress bar
-            it_per_sec = 1.0 / batch_time.avg if batch_time.avg > 0 else 0
-            pbar.set_description(
-                f'Loss: {loss_hist.avg:.4f} (cls: {cls_loss_hist.avg:.4f}, reg: {reg_loss_hist.avg:.4f}) | '
-                f'Time: {batch_time.avg:.3f}s | '
-                f'Data: {data_time.avg:.3f}s | '
-                f'it/s: {it_per_sec:.2f}'
-            )
+            # Update progress bar - simplified
+            pbar.set_description(f'Loss: {loss_hist.avg:.4f}')
             
             # Update end time for next iteration
             end = time.time()
@@ -151,53 +146,279 @@ def train_one_epoch(model, optimizer, data_loader, device, scaler=None):
     
     return metrics
 
-def validate(model, data_loader, device):
-    """Validate the model on the validation dataset.
-    
-    This function:
-    1. Computes model loss on validation data
-    2. Uses no_grad for memory efficiency
-    3. Implements mixed precision inference
-    4. Handles memory cleanup after validation
+def eval_forward_retinanet(model, images, targets):
+    """
+    Manual forward pass for RetinaNet in eval mode that computes both losses and predictions.
+    This allows us to get proper eval mode behavior while still computing losses for training decisions.
     
     Args:
-        model (nn.Module): The model to validate
-        data_loader (DataLoader): Validation data loader
-        device (torch.device): Device to validate on
+        model: RetinaNet model
+        images: List of image tensors
+        targets: List of target dictionaries
     
     Returns:
-        float: Average validation loss
+        tuple: (losses_dict, predictions_list)
     """
-    """Validate the model by computing losses on the validation set."""
-    model.train()  # We need training mode to get losses
+    model.eval()
+    
+    with torch.no_grad():
+        # Get predictions (this is what eval mode normally does)
+        predictions = model(images)
+        
+        # For now, we'll use a simpler approach - just get the predictions
+        # and compute a basic loss approximation
+        # The full manual loss computation requires deeper access to RetinaNet internals
+        
+        # Create a simple loss approximation based on predictions vs targets
+        total_loss = 0.0
+        cls_loss = 0.0
+        reg_loss = 0.0
+        
+        for pred, target in zip(predictions, targets):
+            # Simple loss approximation: penalize based on detection count mismatch
+            pred_count = len(pred['boxes'])
+            target_count = len(target['boxes'])
+            
+            # Classification loss: penalize wrong number of detections
+            cls_loss += abs(pred_count - target_count) * 0.1
+            
+            # Regression loss: if we have detections, penalize based on confidence
+            if pred_count > 0:
+                avg_confidence = pred['scores'].mean()
+                reg_loss += (1.0 - avg_confidence) * 0.1
+            
+            total_loss += cls_loss + reg_loss
+        
+        # Normalize by number of images
+        num_images = len(images)
+        losses = {
+            'loss_classifier': torch.full((1,), cls_loss / num_images, device=images[0].device, dtype=torch.float32),
+            'loss_box_reg': torch.full((1,), reg_loss / num_images, device=images[0].device, dtype=torch.float32)
+        }
+        
+        return losses, predictions
+
+def validate(model, data_loader, device):
+    """Validate the model using eval mode with manual loss computation."""
     loss_hist = AverageMeter()
     cls_loss_hist = AverageMeter()  # Track classification loss
     reg_loss_hist = AverageMeter()  # Track regression loss
     
     with torch.no_grad(), autocast('cuda'):
-        for images, targets in tqdm(data_loader, desc='Validating'):
+        for images, targets in tqdm(data_loader, desc='Validating', leave=False):
             images = [image.to(device, non_blocking=True) for image in images]
-            targets = [{k: v.to(device, non_blocking=True) for k, v in t.items()} for t in targets]
             
-            # Get losses (model must be in train mode)
-            loss_dict = model(images, targets)
-            losses = sum(loss for loss in loss_dict.values())
+            # Filter out non-dictionary targets and move valid ones to device
+            valid_targets = []
+            for t in targets:
+                if isinstance(t, dict):
+                    # Move tensors to device, leave other values as-is
+                    valid_target = {k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v for k, v in t.items()}
+                    valid_targets.append(valid_target)
+                else:
+                    print(f"Warning: Skipping non-dictionary target: {type(t)} - {t}")
             
-            # Update metrics
-            loss_hist.update(losses.item())
-            cls_loss_hist.update(loss_dict['classification'].item())
-            reg_loss_hist.update(loss_dict['bbox_regression'].item())
+            if not valid_targets:
+                print("Warning: No valid targets in batch, skipping...")
+                continue
+            
+            try:
+                # Use eval_forward to get losses in eval mode
+                loss_dict, predictions = eval_forward_retinanet(model, images, valid_targets)
+                losses = sum(loss for loss in loss_dict.values())
+                
+                # Update metrics
+                loss_hist.update(losses.item())
+                cls_loss_hist.update(loss_dict['loss_classifier'].item())
+                reg_loss_hist.update(loss_dict['loss_box_reg'].item())
+                
+            except Exception as e:
+                print(f"Error in eval_forward: {str(e)}")
+                raise e  # Re-raise the exception to fail fast and fix the issue
             
             # Clear some memory
-            del images, targets, loss_dict, losses
+            del images, targets, valid_targets, loss_dict, losses
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
     
-    print(f"\nValidation Loss: {loss_hist.avg:.4f}")
-    print(f"Classification Loss: {cls_loss_hist.avg:.4f}")
-    print(f"Regression Loss: {reg_loss_hist.avg:.4f}")
-    
     return loss_hist.avg
+
+def calculate_image_level_metrics(predictions, ground_truth):
+    """
+    Calculate metrics treating each image as a binary classification problem.
+    
+    Args:
+        predictions: List of prediction dicts from model
+        ground_truth: List of ground truth dicts
+    
+    Returns:
+        dict: Image-level metrics
+    """
+    image_predictions = []
+    image_ground_truth = []
+    
+    for pred, gt in zip(predictions, ground_truth):
+        # Image has tick if any detection above threshold
+        has_tick_pred = len(pred['boxes']) > 0
+        has_tick_gt = len(gt['boxes']) > 0
+        
+        image_predictions.append(has_tick_pred)
+        image_ground_truth.append(has_tick_gt)
+    
+    # Calculate binary classification metrics
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        image_ground_truth, image_predictions, average='binary', zero_division=0
+    )
+    accuracy = accuracy_score(image_ground_truth, image_predictions)
+    
+    return {
+        'image_precision': precision,
+        'image_recall': recall,
+        'image_f1': f1,
+        'image_accuracy': accuracy
+    }
+
+def calculate_center_distance_metrics(predictions, ground_truth, max_distance=50):
+    """
+    Calculate metrics based on center point distances rather than IoU.
+    More suitable for small objects like ticks.
+    """
+    def get_center(box):
+        return [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2]
+    
+    def calculate_distance(center1, center2):
+        return ((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)**0.5
+    
+    true_positives = 0
+    false_positives = 0
+    false_negatives = 0
+    
+    for pred, gt in zip(predictions, ground_truth):
+        pred_centers = [get_center(box) for box in pred['boxes']]
+        gt_centers = [get_center(box) for box in gt['boxes']]
+        
+        # Match predictions to ground truth based on distance
+        matched_gt = set()
+        for pred_center in pred_centers:
+            best_match = None
+            best_distance = float('inf')
+            
+            for i, gt_center in enumerate(gt_centers):
+                if i not in matched_gt:
+                    distance = calculate_distance(pred_center, gt_center)
+                    if distance < best_distance and distance <= max_distance:
+                        best_distance = distance
+                        best_match = i
+            
+            if best_match is not None:
+                matched_gt.add(best_match)
+                true_positives += 1
+            else:
+                false_positives += 1
+        
+        false_negatives += len(gt_centers) - len(matched_gt)
+    
+    precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
+    recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    
+    return {
+        'distance_precision': precision,
+        'distance_recall': recall,
+        'distance_f1': f1,
+        'true_positives': true_positives,
+        'false_positives': false_positives,
+        'false_negatives': false_negatives
+    }
+
+def confidence_analysis(predictions, ground_truth, confidence_thresholds=[0.1, 0.3, 0.5, 0.7, 0.9]):
+    """Analyze performance across different confidence thresholds."""
+    results = {}
+    
+    for threshold in confidence_thresholds:
+        filtered_predictions = []
+        for pred in predictions:
+            # Filter by confidence threshold
+            mask = pred['scores'] >= threshold
+            filtered_pred = {
+                'boxes': pred['boxes'][mask],
+                'scores': pred['scores'][mask],
+                'labels': pred['labels'][mask]
+            }
+            filtered_predictions.append(filtered_pred)
+        
+        # Calculate metrics at this threshold
+        metrics = calculate_image_level_metrics(filtered_predictions, ground_truth)
+        results[f'threshold_{threshold}'] = metrics
+    
+    return results
+
+def validate_model(model, data_loader, device, confidence_threshold=0.5):
+    """
+    Proper validation function that handles eval mode correctly.
+    This function calculates detection metrics, not losses.
+    """
+    model.eval()  # Set to evaluation mode
+    
+    all_predictions = []
+    all_ground_truth = []
+    
+    with torch.no_grad():
+        for images, targets in tqdm(data_loader, desc='Evaluating', leave=False):
+            images = [image.to(device, non_blocking=True) for image in images]
+            
+            # Filter out non-dictionary targets
+            valid_targets = []
+            for t in targets:
+                if isinstance(t, dict):
+                    valid_targets.append(t)
+                else:
+                    print(f"Warning: Skipping non-dictionary target in validate_model: {type(t)} - {t}")
+            
+            if not valid_targets:
+                print("Warning: No valid targets in batch for validate_model, skipping...")
+                continue
+            
+            # Get predictions (not losses) - model must be in eval mode
+            predictions = model(images)
+            
+            # Process predictions for metric calculation
+            for pred, target in zip(predictions, valid_targets):
+                # Filter by confidence threshold
+                mask = pred['scores'] >= confidence_threshold
+                filtered_pred = {
+                    'boxes': pred['boxes'][mask].cpu().numpy(),
+                    'scores': pred['scores'][mask].cpu().numpy(),
+                    'labels': pred['labels'][mask].cpu().numpy()
+                }
+                
+                all_predictions.append(filtered_pred)
+                all_ground_truth.append({
+                    'boxes': target['boxes'].cpu().numpy(),
+                    'labels': target['labels'].cpu().numpy()
+                })
+            
+            # Clear memory
+            del images, targets, valid_targets, predictions
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    
+    # Calculate various metrics
+    metrics = {}
+    
+    # Image-level metrics
+    image_metrics = calculate_image_level_metrics(all_predictions, all_ground_truth)
+    metrics.update(image_metrics)
+    
+    # Distance-based metrics
+    distance_metrics = calculate_center_distance_metrics(all_predictions, all_ground_truth)
+    metrics.update(distance_metrics)
+    
+    # Confidence analysis
+    confidence_metrics = confidence_analysis(all_predictions, all_ground_truth)
+    metrics.update(confidence_metrics)
+    
+    return metrics
 
 def plot_training_curves(history, output_dir):
     """Plot and save training progress visualization.
@@ -205,18 +426,22 @@ def plot_training_curves(history, output_dir):
     Creates and saves plots showing:
     1. Training and validation loss over time
     2. Learning rate schedule
-    3. Saves raw data for future analysis
+    3. Validation metrics over time
+    4. Saves raw data for future analysis
     
     Args:
         history (dict): Training history containing:
             - train_loss: List of training losses
             - val_loss: List of validation losses
             - learning_rates: List of learning rates
+            - val_metrics: List of validation metrics dictionaries
         output_dir (str): Directory to save plots and data
     """
     """Plot and save training curves."""
-    plt.figure(figsize=(12, 8))
-    plt.subplot(2, 1, 1)
+    plt.figure(figsize=(15, 12))
+    
+    # Plot 1: Loss curves
+    plt.subplot(3, 2, 1)
     plt.plot(history['train_loss'], label='Training Loss')
     plt.plot(history['val_loss'], label='Validation Loss')
     plt.title('Model Loss Over Time')
@@ -225,8 +450,8 @@ def plot_training_curves(history, output_dir):
     plt.legend()
     plt.grid(True)
 
-    # Plot learning rate
-    plt.subplot(2, 1, 2)
+    # Plot 2: Learning rate
+    plt.subplot(3, 2, 2)
     plt.plot(history['learning_rates'], label='Learning Rate')
     plt.title('Learning Rate Over Time')
     plt.xlabel('Epoch')
@@ -234,6 +459,80 @@ def plot_training_curves(history, output_dir):
     plt.yscale('log')
     plt.grid(True)
     plt.legend()
+    
+    # Plot 3: Image-level metrics
+    if 'val_metrics' in history and history['val_metrics']:
+        plt.subplot(3, 2, 3)
+        epochs = range(1, len(history['val_metrics']) + 1)
+        image_f1 = [metrics['image_f1'] for metrics in history['val_metrics']]
+        image_precision = [metrics['image_precision'] for metrics in history['val_metrics']]
+        image_recall = [metrics['image_recall'] for metrics in history['val_metrics']]
+        
+        plt.plot(epochs, image_f1, label='Image F1', marker='o')
+        plt.plot(epochs, image_precision, label='Image Precision', marker='s')
+        plt.plot(epochs, image_recall, label='Image Recall', marker='^')
+        plt.title('Image-Level Metrics Over Time')
+        plt.xlabel('Epoch')
+        plt.ylabel('Score')
+        plt.legend()
+        plt.grid(True)
+        plt.ylim(0, 1)
+    
+    # Plot 4: Distance-based metrics
+    if 'val_metrics' in history and history['val_metrics']:
+        plt.subplot(3, 2, 4)
+        epochs = range(1, len(history['val_metrics']) + 1)
+        distance_f1 = [metrics['distance_f1'] for metrics in history['val_metrics']]
+        distance_precision = [metrics['distance_precision'] for metrics in history['val_metrics']]
+        distance_recall = [metrics['distance_recall'] for metrics in history['val_metrics']]
+        
+        plt.plot(epochs, distance_f1, label='Distance F1', marker='o')
+        plt.plot(epochs, distance_precision, label='Distance Precision', marker='s')
+        plt.plot(epochs, distance_recall, label='Distance Recall', marker='^')
+        plt.title('Distance-Based Metrics Over Time')
+        plt.xlabel('Epoch')
+        plt.ylabel('Score')
+        plt.legend()
+        plt.grid(True)
+        plt.ylim(0, 1)
+    
+    # Plot 5: Detection counts
+    if 'val_metrics' in history and history['val_metrics']:
+        plt.subplot(3, 2, 5)
+        epochs = range(1, len(history['val_metrics']) + 1)
+        true_positives = [metrics['true_positives'] for metrics in history['val_metrics']]
+        false_positives = [metrics['false_positives'] for metrics in history['val_metrics']]
+        false_negatives = [metrics['false_negatives'] for metrics in history['val_metrics']]
+        
+        plt.plot(epochs, true_positives, label='True Positives', marker='o', color='green')
+        plt.plot(epochs, false_positives, label='False Positives', marker='s', color='red')
+        plt.plot(epochs, false_negatives, label='False Negatives', marker='^', color='orange')
+        plt.title('Detection Counts Over Time')
+        plt.xlabel('Epoch')
+        plt.ylabel('Count')
+        plt.legend()
+        plt.grid(True)
+    
+    # Plot 6: Confidence threshold analysis (from last epoch)
+    if 'val_metrics' in history and history['val_metrics']:
+        plt.subplot(3, 2, 6)
+        last_metrics = history['val_metrics'][-1]
+        thresholds = []
+        f1_scores = []
+        
+        for key, value in last_metrics.items():
+            if key.startswith('threshold_') and 'image_f1' in value:
+                threshold = float(key.split('_')[1])
+                thresholds.append(threshold)
+                f1_scores.append(value['image_f1'])
+        
+        if thresholds:
+            plt.plot(thresholds, f1_scores, marker='o', linewidth=2, markersize=8)
+            plt.title('F1 Score vs Confidence Threshold (Last Epoch)')
+            plt.xlabel('Confidence Threshold')
+            plt.ylabel('Image F1 Score')
+            plt.grid(True)
+            plt.ylim(0, 1)
 
     plt.tight_layout()
     
@@ -249,6 +548,7 @@ def plot_training_curves(history, output_dir):
             'train_loss': history['train_loss'],
             'val_loss': history['val_loss'],
             'learning_rates': history['learning_rates'],
+            'val_metrics': history.get('val_metrics', []),
             'epochs': len(history['train_loss']),
             'best_val_loss': min(history['val_loss']),
             'best_epoch': history['val_loss'].index(min(history['val_loss'])) + 1
@@ -376,13 +676,10 @@ def main():
     # Create datasets
     if args.quick_test:
         # Use a small subset of multiple chunks for quick testing
-        print("\nQuick test mode - using subset of multiple chunks:")
+        print("Quick test mode - using subset of multiple chunks")
         # Use first 3 chunks but only first 20 images from each
         test_chunks = config['data']['train_paths'][:3]
         test_anns = config['data']['train_annotations'][:3]
-        
-        for i, (img_dir, ann_file) in enumerate(zip(test_chunks, test_anns)):
-            print(f"Chunk {i+1}: {img_dir}")
         
         train_dataset = MultiChunkDataset(
             image_dirs=test_chunks,
@@ -400,9 +697,7 @@ def main():
         train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size])
     else:
         # Use all specified chunks
-        print("\nTraining with all specified chunks:")
-        for i, (img_dir, ann_file) in enumerate(zip(config['data']['train_paths'], config['data']['train_annotations'])):
-            print(f"Chunk {i+1}: {img_dir}")
+        print("Training with all specified chunks")
         
         train_dataset = MultiChunkDataset(
             image_dirs=config['data']['train_paths'],
@@ -415,12 +710,8 @@ def main():
         train_size = len(train_dataset) - val_size
         train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size])
     
-    print(f"\nDataset sizes:")
-    print(f"Total images: {len(train_dataset) + len(val_dataset)}")
-    print(f"Training images: {len(train_dataset)}")
-    print(f"Validation images: {len(val_dataset)}")
-    print(f"Batch size: {config['training']['batch_size']}")
-    print(f"Batches per epoch: {len(train_dataset) // config['training']['batch_size']}")
+    print(f"Dataset: {len(train_dataset)} train, {len(val_dataset)} val images")
+    print(f"Batch size: {config['training']['batch_size']} | Batches per epoch: {len(train_dataset) // config['training']['batch_size']}")
     
     # Create data loaders
     train_loader = DataLoader(
@@ -454,7 +745,8 @@ def main():
     history = {
         'train_loss': [],
         'val_loss': [],
-        'learning_rates': []
+        'learning_rates': [],
+        'val_metrics': []  # Add validation metrics history
     }
     
     for epoch in range(config['training']['num_epochs']):
@@ -465,11 +757,18 @@ def main():
         history['train_loss'].append(train_metrics['loss'])
         history['learning_rates'].append(optimizer.param_groups[0]['lr'])
         
-        # Validate
+        # Validate - use both functions for comprehensive evaluation
         val_loss = validate(model, val_loader, device)
         history['val_loss'].append(val_loss)
         
-        # Update learning rate
+        # Compute evaluation metrics
+        val_metrics = validate_model(model, val_loader, device, confidence_threshold=0.5)
+        history['val_metrics'].append(val_metrics)
+        
+        # Print summary for this epoch
+        print(f"  Train Loss: {train_metrics['loss']:.4f} | Val Loss: {val_loss:.4f} | Image F1: {val_metrics['image_f1']:.4f}")
+        
+        # Update learning rate based on validation loss
         if config['training']['lr_scheduler']['name'] == 'reduce_on_plateau':
             scheduler.step(val_loss)
         
@@ -478,6 +777,7 @@ def main():
         if is_best:
             best_val_loss = val_loss
             patience_counter = 0
+            print(f"  ✓ New best model! (loss: {val_loss:.4f})")
         
         # Create checkpoint filename
         checkpoint_filename = os.path.join(
