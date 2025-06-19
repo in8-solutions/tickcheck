@@ -9,4 +9,5 @@ tqdm>=4.65.0
 PyYAML>=6.0.1
 pandas>=1.3.0
 requests>=2.26.0
-opencv-python>=4.8.0  # Full version for GUI support 
+opencv-python>=4.8.0  # Full version for GUI support
+scikit-learn>=1.3.0  # For evaluation metrics 

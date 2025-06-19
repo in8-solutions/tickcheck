@@ -10,7 +10,6 @@ Key Features:
 - Handles bounding box normalization
 - Provides configurable data augmentation
 - Supports both training and inference transformations
-- Properly handles negative examples (images without ticks)
 """
 
 import os
@@ -30,7 +29,6 @@ class DetectionDataset(Dataset):
     2. Converting bounding box formats
     3. Applying transformations and augmentations
     4. Preparing data in the format expected by the model
-    5. Handling negative examples (images without ticks)
     
     Args:
         image_dir (str): Directory containing the images
@@ -96,11 +94,11 @@ class DetectionDataset(Dataset):
         
         # Create category mapping if categories are provided
         if isinstance(self.annotations, dict) and 'categories' in self.annotations:
-            # Map category IDs to start from 0 (tick class)
-            self.cat_mapping = {cat['id']: 0 for cat in self.annotations['categories']}
+            # Map category IDs to ensure they match our class numbering (0=background, 1=tick)
+            self.cat_mapping = {cat['id']: 1 for cat in self.annotations['categories']}  # All categories map to tick (1)
         else:
-            # If no categories provided, assume all annotations are for class 0 (tick)
-            self.cat_mapping = {1: 0}
+            # If no categories provided, assume all annotations are for class 1 (tick)
+            self.cat_mapping = {1: 1}
         
         self.image_info = {img['id']: img for img in self.annotations['images']}
     
@@ -113,7 +111,6 @@ class DetectionDataset(Dataset):
         
         # Get the image info
         image_info = next(img for img in self.annotations['images'] if img['id'] == image_id)
-        # The file_name should be just the image name, not the full path
         image_path = os.path.join(self.image_dir, filename)
         
         # Load image
@@ -146,11 +143,15 @@ class DetectionDataset(Dataset):
             # Only add box if it's valid
             if x1 < x2 and y1 < y2 and (x2 - x1) > 1 and (y2 - y1) > 1:
                 boxes.append([x1, y1, x2, y2])
-                # Map category ID to ensure it's 0 for ticks
+                # Map category ID to ensure it's 1 (tick)
                 category_id = ann['category_id']
-                labels.append(0)  # All valid boxes are ticks (class 0)
-        
-        # Convert to tensors
+                labels.append(self.cat_mapping.get(category_id, 1))  # Default to 1 (tick) if not found
+            
+        # If no valid boxes, create a dummy box with background label (0)
+        if not boxes:
+            boxes = [[0, 0, width, height]]
+            labels = [0]  # Background class
+            
         boxes = np.array(boxes, dtype=np.float32)
         labels = np.array(labels, dtype=np.int64)
         
@@ -170,7 +171,7 @@ class DetectionDataset(Dataset):
             'boxes': boxes,
             'labels': labels,
             'image_id': torch.tensor([image_id]),
-            'area': torch.tensor([(box[2] - box[0]) * (box[3] - box[1]) for box in boxes], dtype=torch.float32) if len(boxes) > 0 else torch.tensor([], dtype=torch.float32),
+            'area': torch.tensor([(box[2] - box[0]) * (box[3] - box[1]) for box in boxes], dtype=torch.float32),
             'iscrowd': torch.zeros((len(boxes),), dtype=torch.int64)
         }
         

@@ -40,34 +40,25 @@ from utils import load_config
 from transforms import get_transform
 from model import create_model
 from torchvision.transforms import functional as F
-from dataset import DetectionDataset
+from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
 
 class ModelEvaluator:
     """
     A class to evaluate an object detection model on images.
     
-    This class demonstrates several important ML concepts:
-    1. Model Loading: How to load a trained model from a checkpoint
-    2. Inference: How to run the model on new images
-    3. Post-processing: How to interpret and filter model outputs
-    4. Visualization: How to display model predictions
-    
-    Note on Model Architecture Choices:
-    - CNNs excel at spatial feature extraction (like our tick detection)
-    - For temporal data (like network protocols), consider:
-      * Sequence length requirements
-      * Real-time vs batch processing needs
-      * Feature correlation across time steps
-      * Causality requirements (future data availability)
+    This class handles binary classification (tick vs background) and provides
+    separate metrics for images with and without ticks.
     """
     
-    def __init__(self, model_path, confidence_threshold=0.5):
+    def __init__(self, model_path, confidence_threshold=None):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.confidence_threshold = confidence_threshold
         
         # Load configuration for transforms
         config_path = 'config.yaml'
         self.config = load_config(config_path)
+        
+        # Use model's box_score_thresh if no confidence threshold provided
+        self.confidence_threshold = confidence_threshold if confidence_threshold is not None else self.config['model']['box_score_thresh']
         
         # Create model with our configuration
         self.model = create_model(self.config)
@@ -84,14 +75,20 @@ class ModelEvaluator:
         # Initialize metrics storage
         self.metrics = {
             'with_ticks': {
+                'total_images': 0,
+                'total_detections': 0,
+                'detection_counts': [],
+                'confidence_scores': [],
                 'true_positives': 0,
-                'false_negatives': 0,
-                'false_positives': 0,
-                'total_ground_truth': 0
+                'false_negatives': 0
             },
             'without_ticks': {
+                'total_images': 0,
+                'total_detections': 0,
+                'detection_counts': [],
+                'confidence_scores': [],
                 'false_positives': 0,
-                'total_images': 0
+                'true_negatives': 0
             }
         }
     
@@ -100,7 +97,6 @@ class ModelEvaluator:
         # Load and preprocess image
         image = Image.open(image_path).convert('RGB')
         image_np = np.array(image)
-        img_height, img_width = image_np.shape[:2]
         
         # Apply transforms
         transformed = self.transform(image=image_np)
@@ -113,198 +109,259 @@ class ModelEvaluator:
         with torch.no_grad():
             predictions = self.model([image_tensor])
         
-        # Filter predictions to only include tick class (class 1)
-        pred = predictions[0]
-        tick_mask = pred['labels'] == 1  # Only keep tick class
-        filtered_pred = {
-            'boxes': pred['boxes'][tick_mask],
-            'scores': pred['scores'][tick_mask],
-            'labels': pred['labels'][tick_mask]
-        }
-        
-        # Scale box coordinates back to original image size
-        scale_x = img_width / self.config['data']['input_size'][1]
-        scale_y = img_height / self.config['data']['input_size'][0]
-        
-        filtered_pred['boxes'][:, 0] = filtered_pred['boxes'][:, 0] * scale_x
-        filtered_pred['boxes'][:, 1] = filtered_pred['boxes'][:, 1] * scale_y
-        filtered_pred['boxes'][:, 2] = filtered_pred['boxes'][:, 2] * scale_x
-        filtered_pred['boxes'][:, 3] = filtered_pred['boxes'][:, 3] * scale_y
-        
-        return filtered_pred
+        return predictions[0]
     
-    def get_image_files(self, directory):
-        """Recursively get all image files from a directory and its subdirectories."""
-        image_files = []
-        for root, _, files in os.walk(directory):
-            for file in files:
-                if file.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    image_files.append(os.path.join(root, file))
-        return image_files
-    
-    def evaluate_directory(self, input_dir, output_dir, is_with_ticks=True):
-        """Evaluate model on all images in a directory."""
+    def evaluate_directory(self, input_dir, output_dir):
+        """Evaluate model on images in both 'with_ticks' and 'without_ticks' subdirectories."""
         os.makedirs(output_dir, exist_ok=True)
         
-        # Get all image files recursively
-        image_files = self.get_image_files(input_dir)
-        
-        for image_path in tqdm(image_files, desc=f"Processing {'with_ticks' if is_with_ticks else 'without_ticks'} images"):
-            # Create output path preserving subdirectory structure
-            rel_path = os.path.relpath(image_path, input_dir)
-            output_path = os.path.join(output_dir, f"pred_{rel_path}")
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        # Process each category
+        for category in ['with_ticks', 'without_ticks']:
+            category_dir = os.path.join(input_dir, category)
+            if not os.path.exists(category_dir):
+                print(f"Warning: {category_dir} not found, skipping...")
+                continue
+                
+            category_output_dir = os.path.join(output_dir, category)
+            os.makedirs(category_output_dir, exist_ok=True)
             
-            # Get predictions
-            predictions = self.predict_image(image_path)
-            boxes = predictions['boxes']
-            scores = predictions['scores']
-            labels = predictions['labels']
+            # Get all images in category
+            image_files = []
+            for root, _, files in os.walk(category_dir):
+                for f in files:
+                    if f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        image_files.append(os.path.join(root, f))
             
-            # Filter predictions by confidence
-            mask = scores >= self.confidence_threshold
-            boxes = boxes[mask].cpu().numpy()
-            scores = scores[mask].cpu().numpy()
-            
-            # Update metrics
-            if is_with_ticks:
-                # For with_ticks images, we expect at least one detection
-                self.metrics['with_ticks']['total_ground_truth'] += 1
-                if len(boxes) > 0:
-                    self.metrics['with_ticks']['true_positives'] += 1
+            print(f"\nProcessing {category} images...")
+            for image_path in tqdm(image_files, desc=f"Processing {category}"):
+                # Get relative path for output
+                rel_path = os.path.relpath(image_path, category_dir)
+                output_path = os.path.join(category_output_dir, f"pred_{rel_path}")
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                
+                # Get predictions
+                predictions = self.predict_image(image_path)
+                boxes = predictions['boxes']
+                scores = predictions['scores']
+                labels = predictions['labels']
+                
+                # Update category metrics
+                self.metrics[category]['total_images'] += 1
+                num_detections = len(boxes)
+                self.metrics[category]['total_detections'] += num_detections
+                self.metrics[category]['detection_counts'].append(num_detections)
+                
+                if isinstance(scores, torch.Tensor):
+                    self.metrics[category]['confidence_scores'].extend(scores.cpu().numpy().tolist())
                 else:
-                    self.metrics['with_ticks']['false_negatives'] += 1
-            else:
-                # For without_ticks images, any detection is a false positive
-                self.metrics['without_ticks']['total_images'] += 1
-                if len(boxes) > 0:
-                    self.metrics['without_ticks']['false_positives'] += 1
-            
-            # Save visualization
-            self.visualize_predictions(image_path, boxes, scores, output_path)
+                    self.metrics[category]['confidence_scores'].extend(scores)
+                
+                # Update classification metrics
+                if category == 'with_ticks':
+                    if num_detections > 0:
+                        self.metrics[category]['true_positives'] += 1
+                    else:
+                        self.metrics[category]['false_negatives'] += 1
+                else:  # without_ticks
+                    if num_detections > 0:
+                        self.metrics[category]['false_positives'] += 1
+                    else:
+                        self.metrics[category]['true_negatives'] += 1
+                
+                # Save visualization
+                self.visualize_predictions(image_path, boxes, scores, labels, output_path)
+        
+        # Generate and save comprehensive report
+        self.generate_report(output_dir)
     
-    def calculate_iou(self, box1, box2):
-        """Calculate Intersection over Union between two boxes."""
-        # Convert to [x1, y1, x2, y2] format
-        box1 = [box1[0], box1[1], box1[0] + box1[2], box1[1] + box1[3]]
-        box2 = [box2[0], box2[1], box2[0] + box2[2], box2[1] + box2[3]]
-        
-        # Calculate intersection
-        x1 = max(box1[0], box2[0])
-        y1 = max(box1[1], box2[1])
-        x2 = min(box1[2], box2[2])
-        y2 = min(box1[3], box2[3])
-        
-        if x2 < x1 or y2 < y1:
-            return 0.0
-        
-        intersection = (x2 - x1) * (y2 - y1)
-        
-        # Calculate union
-        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
-        box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
-        union = box1_area + box2_area - intersection
-        
-        return intersection / union if union > 0 else 0.0
-    
-    def visualize_predictions(self, image_path, boxes, scores, output_path):
+    def visualize_predictions(self, image_path, boxes, scores, labels, output_path):
         """Draw bounding boxes on image and save."""
-        image = Image.open(image_path).convert('RGB')
+        # Load original image to get dimensions
+        image = Image.open(image_path)
+        orig_width, orig_height = image.size
+        
+        # Calculate scaling factors
+        scale_x = orig_width / self.config['data']['input_size'][1]
+        scale_y = orig_height / self.config['data']['input_size'][0]
+        
         draw = ImageDraw.Draw(image)
         
-        # Get image dimensions
-        img_width, img_height = image.size
+        if isinstance(scores, torch.Tensor):
+            scores = scores.cpu().numpy()
         
-        # Convert boxes to integers and clamp to image boundaries
-        boxes = boxes.astype(int)
-        boxes[:, 0] = np.clip(boxes[:, 0], 0, img_width)   # x1
-        boxes[:, 1] = np.clip(boxes[:, 1], 0, img_height)  # y1
-        boxes[:, 2] = np.clip(boxes[:, 2], 0, img_width)   # x2
-        boxes[:, 3] = np.clip(boxes[:, 3], 0, img_height)  # y2
+        # Filter predictions by model's minimum threshold
+        min_threshold_mask = scores >= self.config['model']['box_score_thresh']
+        boxes = boxes[min_threshold_mask].cpu().numpy()
+        scores = scores[min_threshold_mask]
         
-        # Draw each box with a different color based on confidence
-        for i, (box, score) in enumerate(zip(boxes, scores)):
+        # Scale boxes back to original image size
+        boxes = boxes * np.array([scale_x, scale_y, scale_x, scale_y])
+        
+        # Draw each box
+        for box, score in zip(boxes, scores):
             x1, y1, x2, y2 = box
-            # Use different colors based on confidence
-            if score > 0.7:
+            # Show yellow boxes for detections within 0.2 of threshold
+            if score >= self.confidence_threshold:
                 color = 'red'
-            elif score > 0.5:
-                color = 'orange'
-            else:
+            elif score >= (self.confidence_threshold - 0.2):
                 color = 'yellow'
-            
-            # Draw box with thicker line
-            draw.rectangle([x1, y1, x2, y2], outline=color, width=4)
-            # Draw score with larger font
-            draw.text((x1, y1-20), f'{score:.2f}', fill=color, font=None, font_size=24)
+            else:
+                continue  # Skip boxes below this range
+                
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+            draw.text((x1, y1-10), f'{score:.2f}', fill=color)
         
-        # Save with high quality
-        image.save(output_path, quality=95)
+        image.save(output_path)
     
     def generate_report(self, output_dir):
-        """Generate and save evaluation report."""
-        # Calculate metrics
-        with_ticks = self.metrics['with_ticks']
-        without_ticks = self.metrics['without_ticks']
+        """Generate comprehensive evaluation report with binary classification metrics."""
+        # Calculate overall metrics
+        total_images = (self.metrics['with_ticks']['total_images'] + 
+                       self.metrics['without_ticks']['total_images'])
         
-        # Calculate precision and recall for with_ticks
-        precision = with_ticks['true_positives'] / (with_ticks['true_positives'] + with_ticks['false_positives']) if (with_ticks['true_positives'] + with_ticks['false_positives']) > 0 else 0
-        recall = with_ticks['true_positives'] / with_ticks['total_ground_truth'] if with_ticks['total_ground_truth'] > 0 else 0
+        # Calculate precision, recall, and F1 score
+        tp = self.metrics['with_ticks']['true_positives']
+        fp = self.metrics['without_ticks']['false_positives']
+        fn = self.metrics['with_ticks']['false_negatives']
+        tn = self.metrics['without_ticks']['true_negatives']
+        
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
         f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
         
-        # Calculate false positive rate for without_ticks
-        fpr = without_ticks['false_positives'] / without_ticks['total_images'] if without_ticks['total_images'] > 0 else 0
+        # Calculate detection distributions
+        for category in ['with_ticks', 'without_ticks']:
+            detection_ranges = {
+                '0-1': 0,
+                '2-5': 0,
+                '6-10': 0,
+                '>10': 0
+            }
+            
+            for count in self.metrics[category]['detection_counts']:
+                if count <= 1:
+                    detection_ranges['0-1'] += 1
+                elif count <= 5:
+                    detection_ranges['2-5'] += 1
+                elif count <= 10:
+                    detection_ranges['6-10'] += 1
+                else:
+                    detection_ranges['>10'] += 1
+            
+            self.metrics[category]['detection_distribution'] = detection_ranges
         
-        # Generate report
-        report = f"""
-==================================================
-EVALUATION REPORT
-==================================================
-
-Confidence Threshold: {self.confidence_threshold:.2f}
-
-With Ticks Images:
-Total Ground Truth Ticks: {with_ticks['total_ground_truth']}
-True Positives: {with_ticks['true_positives']}
-False Positives: {with_ticks['false_positives']}
-False Negatives: {with_ticks['false_negatives']}
-Precision: {precision:.4f}
-Recall: {recall:.4f}
-F1 Score: {f1:.4f}
-
-Without Ticks Images:
-Total Images: {without_ticks['total_images']}
-False Positives: {without_ticks['false_positives']}
-False Positive Rate: {fpr:.4f}
-"""
+        # Calculate confidence distributions
+        for category in ['with_ticks', 'without_ticks']:
+            confidence_ranges = {
+                '0.5-0.6': 0,
+                '0.6-0.7': 0,
+                '0.7-0.8': 0,
+                '0.8-0.9': 0,
+                '0.9-1.0': 0
+            }
+            
+            for score in self.metrics[category]['confidence_scores']:
+                if score >= 0.5:
+                    if score < 0.6:
+                        confidence_ranges['0.5-0.6'] += 1
+                    elif score < 0.7:
+                        confidence_ranges['0.6-0.7'] += 1
+                    elif score < 0.8:
+                        confidence_ranges['0.7-0.8'] += 1
+                    elif score < 0.9:
+                        confidence_ranges['0.8-0.9'] += 1
+                    else:
+                        confidence_ranges['0.9-1.0'] += 1
+            
+            self.metrics[category]['confidence_distribution'] = confidence_ranges
+        
+        # Prepare final report
+        report = {
+            'confidence_threshold': self.confidence_threshold,
+            'binary_classification_metrics': {
+                'precision': precision,
+                'recall': recall,
+                'f1_score': f1,
+                'confusion_matrix': {
+                    'true_positives': tp,
+                    'false_positives': fp,
+                    'true_negatives': tn,
+                    'false_negatives': fn
+                }
+            },
+            'with_ticks': {
+                'total_images': self.metrics['with_ticks']['total_images'],
+                'total_detections': self.metrics['with_ticks']['total_detections'],
+                'average_detections': (self.metrics['with_ticks']['total_detections'] / 
+                                     self.metrics['with_ticks']['total_images'] 
+                                     if self.metrics['with_ticks']['total_images'] > 0 else 0),
+                'detection_distribution': self.metrics['with_ticks']['detection_distribution'],
+                'confidence_distribution': self.metrics['with_ticks']['confidence_distribution']
+            },
+            'without_ticks': {
+                'total_images': self.metrics['without_ticks']['total_images'],
+                'total_detections': self.metrics['without_ticks']['total_detections'],
+                'average_detections': (self.metrics['without_ticks']['total_detections'] / 
+                                     self.metrics['without_ticks']['total_images']
+                                     if self.metrics['without_ticks']['total_images'] > 0 else 0),
+                'detection_distribution': self.metrics['without_ticks']['detection_distribution'],
+                'confidence_distribution': self.metrics['without_ticks']['confidence_distribution']
+            }
+        }
         
         # Save report
-        report_path = os.path.join(output_dir, 'evaluation_report.txt')
+        report_path = os.path.join(output_dir, 'evaluation_report.json')
         with open(report_path, 'w') as f:
-            f.write(report)
+            json.dump(report, f, indent=2)
         
-        # Print report
-        print(report)
+        # Print human-readable report
+        print("\n" + "="*50)
+        print("EVALUATION REPORT")
+        print("="*50)
+        
+        print("\nBinary Classification Metrics:")
+        print(f"Precision: {precision:.3f}")
+        print(f"Recall: {recall:.3f}")
+        print(f"F1 Score: {f1:.3f}")
+        print("\nConfusion Matrix:")
+        print(f"True Positives: {tp}")
+        print(f"False Positives: {fp}")
+        print(f"True Negatives: {tn}")
+        print(f"False Negatives: {fn}")
+        
+        for category in ['with_ticks', 'without_ticks']:
+            print(f"\n{category.replace('_', ' ').title()} Metrics:")
+            print(f"Total Images: {self.metrics[category]['total_images']}")
+            print(f"Total Detections: {self.metrics[category]['total_detections']}")
+            print(f"Average Detections per Image: {report[category]['average_detections']:.2f}")
+            
+            print("\nDetection Distribution:")
+            for range_name, count in self.metrics[category]['detection_distribution'].items():
+                percentage = (count / self.metrics[category]['total_images'] * 100 
+                            if self.metrics[category]['total_images'] > 0 else 0)
+                print(f"  {range_name} detections: {count} images ({percentage:.1f}%)")
+            
+            print("\nConfidence Distribution:")
+            for range_name, count in self.metrics[category]['confidence_distribution'].items():
+                percentage = (count / self.metrics[category]['total_detections'] * 100 
+                            if self.metrics[category]['total_detections'] > 0 else 0)
+                print(f"  {range_name}: {count} detections ({percentage:.1f}%)")
+        
+        print("\n" + "="*50)
+        print(f"Full report saved to: {report_path}")
+        print("="*50 + "\n")
 
-def main():
-    parser = argparse.ArgumentParser(description='Evaluate object detection model')
-    parser.add_argument('--model', type=str, required=True, help='Path to model checkpoint')
-    parser.add_argument('--input', type=str, nargs='+', required=True, help='Input directories containing images')
-    parser.add_argument('--output', type=str, required=True, help='Output directory for visualizations')
-    parser.add_argument('--threshold', type=float, default=0.5, help='Confidence threshold for detections')
+def evaluate_directory(model_path, input_dir, output_dir, confidence_threshold=None):
+    """Evaluate a directory of images with separate 'with_ticks' and 'without_ticks' subdirectories."""
+    evaluator = ModelEvaluator(model_path, confidence_threshold=confidence_threshold)
+    evaluator.evaluate_directory(input_dir, output_dir)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Evaluate a trained model on images")
+    parser.add_argument("--model", required=True, help="Path to the trained model checkpoint")
+    parser.add_argument("--input", required=True, help="Path to input directory containing 'with_ticks' and 'without_ticks' subdirectories")
+    parser.add_argument("--output", required=True, help="Path to output directory for results")
+    parser.add_argument("--confidence", type=float, default=None, help="Confidence threshold for detections")
+    
     args = parser.parse_args()
-    
-    # Create evaluator
-    evaluator = ModelEvaluator(args.model, args.threshold)
-    
-    # Process each input directory
-    for input_dir in args.input:
-        is_with_ticks = 'with_ticks' in input_dir
-        output_dir = os.path.join(args.output, 'with_ticks' if is_with_ticks else 'without_ticks')
-        evaluator.evaluate_directory(input_dir, output_dir, is_with_ticks)
-    
-    # Generate final report
-    evaluator.generate_report(args.output)
-
-if __name__ == '__main__':
-    main() 
+    evaluate_directory(args.model, args.input, args.output, args.confidence) 

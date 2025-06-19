@@ -57,54 +57,147 @@ def print_gpu_memory():
         if allocated > 1000:  # Only print if using significant memory
             print(f"GPU memory: {allocated:.0f}MB allocated, {cached:.0f}MB cached")
 
-def train_one_epoch(model, optimizer, data_loader, device, epoch, config=None):
+def train_one_epoch(model, optimizer, data_loader, device, scaler=None):
+    """Train the model for one epoch with performance monitoring."""
     model.train()
-    total_loss = 0
+    loss_hist = AverageMeter()
+    cls_loss_hist = AverageMeter()  # Track classification loss
+    reg_loss_hist = AverageMeter()  # Track regression loss
+    batch_time = AverageMeter()
+    data_time = AverageMeter()
     
-    # Use tqdm without Tkinter
-    pbar = tqdm(data_loader, desc=f'Epoch {epoch}/{config["training"]["num_epochs"]}', 
-                leave=True, dynamic_ncols=True)
+    # Enable cuDNN autotuner
+    torch.backends.cudnn.benchmark = True
+    
+    # Progress bar
+    pbar = tqdm(data_loader, total=len(data_loader))
+    
+    # Initialize timing
+    end = time.time()
     
     for batch_idx, (images, targets) in enumerate(pbar):
-        images = [img.to(device) for img in images]
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        # Measure data loading time
+        data_time.update(time.time() - end)
         
-        loss_dict = model(images, targets)
-        losses = sum(loss for loss in loss_dict.values())
-        
-        optimizer.zero_grad()
-        losses.backward()
-        optimizer.step()
-        
-        total_loss += losses.item()
-        
-        # Update progress bar
-        pbar.set_postfix({
-            'Loss': f'{losses.item():.4f}',
-            'Time': f'{pbar.format_dict["elapsed"]/pbar.format_dict["n"]:.3f}s',
-            'Data': f'{pbar.format_dict["elapsed"]/pbar.format_dict["n"]:.3f}s',
-            'it/s': f'{pbar.format_dict["n"]/pbar.format_dict["elapsed"]:.2f}'
-        })
+        try:
+            # Move data to device
+            images = [image.to(device, non_blocking=True) for image in images]
+            targets = [{k: v.to(device, non_blocking=True) for k, v in t.items()} for t in targets]
+            
+            # Measure forward/backward time
+            batch_start = time.time()
+            
+            # Forward pass with mixed precision where available
+            if scaler is not None:
+                with autocast(device_type='cuda', dtype=torch.float16):
+                    loss_dict = model(images, targets)
+                    losses = sum(loss for loss in loss_dict.values())
+                
+                # Backward pass with gradient scaling
+                scaler.scale(losses).backward()
+                
+                # Add gradient clipping
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=20.0)
+                
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Standard forward and backward pass
+                loss_dict = model(images, targets)
+                losses = sum(loss for loss in loss_dict.values())
+                losses.backward()
+                
+                # Add gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=20.0)
+                
+                optimizer.step()
+            
+            optimizer.zero_grad(set_to_none=True)
+            
+            # Update metrics
+            loss_hist.update(losses.item())
+            # RetinaNet uses these keys for its losses
+            cls_loss_hist.update(loss_dict['classification'].item())
+            reg_loss_hist.update(loss_dict['bbox_regression'].item())
+            
+            # Measure batch time
+            batch_time.update(time.time() - batch_start)
+            
+            # Update progress bar
+            it_per_sec = 1.0 / batch_time.avg if batch_time.avg > 0 else 0
+            pbar.set_description(
+                f'Loss: {loss_hist.avg:.4f} (cls: {cls_loss_hist.avg:.4f}, reg: {reg_loss_hist.avg:.4f}) | '
+                f'Time: {batch_time.avg:.3f}s | '
+                f'Data: {data_time.avg:.3f}s | '
+                f'it/s: {it_per_sec:.2f}'
+            )
+            
+            # Update end time for next iteration
+            end = time.time()
+            
+        except Exception as e:
+            print(f"Error in batch {batch_idx}: {str(e)}")
+            raise e
     
-    return total_loss / len(data_loader)
+    metrics = {
+        'loss': loss_hist.avg,
+        'cls_loss': cls_loss_hist.avg,
+        'reg_loss': reg_loss_hist.avg,
+        'time_per_batch': batch_time.avg,
+        'data_time': data_time.avg,
+        'iterations_per_second': 1.0/batch_time.avg if batch_time.avg > 0 else 0
+    }
+    
+    return metrics
 
 def validate(model, data_loader, device):
-    model.eval()
-    total_loss = 0
+    """Validate the model on the validation dataset.
     
-    # Use tqdm without Tkinter
-    pbar = tqdm(data_loader, desc='Validating', leave=True, dynamic_ncols=True)
+    This function:
+    1. Computes model loss on validation data
+    2. Uses no_grad for memory efficiency
+    3. Implements mixed precision inference
+    4. Handles memory cleanup after validation
     
-    with torch.no_grad():
-        for images, targets in pbar:
-            images = [img.to(device) for img in images]
-            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+    Args:
+        model (nn.Module): The model to validate
+        data_loader (DataLoader): Validation data loader
+        device (torch.device): Device to validate on
+    
+    Returns:
+        float: Average validation loss
+    """
+    """Validate the model by computing losses on the validation set."""
+    model.train()  # We need training mode to get losses
+    loss_hist = AverageMeter()
+    cls_loss_hist = AverageMeter()  # Track classification loss
+    reg_loss_hist = AverageMeter()  # Track regression loss
+    
+    with torch.no_grad(), autocast('cuda'):
+        for images, targets in tqdm(data_loader, desc='Validating'):
+            images = [image.to(device, non_blocking=True) for image in images]
+            targets = [{k: v.to(device, non_blocking=True) for k, v in t.items()} for t in targets]
             
+            # Get losses (model must be in train mode)
             loss_dict = model(images, targets)
             losses = sum(loss for loss in loss_dict.values())
-            total_loss += losses.item()
+            
+            # Update metrics
+            loss_hist.update(losses.item())
+            cls_loss_hist.update(loss_dict['classification'].item())
+            reg_loss_hist.update(loss_dict['bbox_regression'].item())
+            
+            # Clear some memory
+            del images, targets, loss_dict, losses
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
-    return total_loss / len(data_loader)
+    print(f"\nValidation Loss: {loss_hist.avg:.4f}")
+    print(f"Classification Loss: {cls_loss_hist.avg:.4f}")
+    print(f"Regression Loss: {reg_loss_hist.avg:.4f}")
+    
+    return loss_hist.avg
 
 def plot_training_curves(history, output_dir):
     """Plot and save training progress visualization.
@@ -121,31 +214,16 @@ def plot_training_curves(history, output_dir):
             - learning_rates: List of learning rates
         output_dir (str): Directory to save plots and data
     """
+    """Plot and save training curves."""
     plt.figure(figsize=(12, 8))
-    
-    # Plot losses
     plt.subplot(2, 1, 1)
-    
-    # Convert to numpy arrays and handle NaN values
-    train_loss = np.array(history['train_loss'])
-    val_loss = np.array(history['val_loss'])
-    
-    # Create mask for non-NaN values
-    train_mask = ~np.isnan(train_loss)
-    val_mask = ~np.isnan(val_loss)
-    
-    # Plot only non-NaN values
-    plt.plot(np.where(train_mask)[0], train_loss[train_mask], label='Training Loss', color='blue')
-    plt.plot(np.where(val_mask)[0], val_loss[val_mask], label='Validation Loss', color='red')
-    
+    plt.plot(history['train_loss'], label='Training Loss')
+    plt.plot(history['val_loss'], label='Validation Loss')
     plt.title('Model Loss Over Time')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
     plt.grid(True)
-    
-    # Add y-axis limits to prevent automatic scaling to 0
-    plt.ylim(bottom=0)
 
     # Plot learning rate
     plt.subplot(2, 1, 2)
@@ -172,8 +250,8 @@ def plot_training_curves(history, output_dir):
             'val_loss': history['val_loss'],
             'learning_rates': history['learning_rates'],
             'epochs': len(history['train_loss']),
-            'best_val_loss': min([x for x in history['val_loss'] if not np.isnan(x)]),
-            'best_epoch': history['val_loss'].index(min([x for x in history['val_loss'] if not np.isnan(x)])) + 1
+            'best_val_loss': min(history['val_loss']),
+            'best_epoch': history['val_loss'].index(min(history['val_loss'])) + 1
         }, f, indent=4)
 
 def load_chunk_data(chunk_dir: str, val_ratio: float = 0.2, random_seed: int = 42) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
@@ -383,8 +461,8 @@ def main():
         print(f"\nEpoch {epoch+1}/{config['training']['num_epochs']}")
         
         # Train
-        train_loss = train_one_epoch(model, optimizer, train_loader, device, epoch, config)
-        history['train_loss'].append(train_loss)
+        train_metrics = train_one_epoch(model, optimizer, train_loader, device, scaler)
+        history['train_loss'].append(train_metrics['loss'])
         history['learning_rates'].append(optimizer.param_groups[0]['lr'])
         
         # Validate
