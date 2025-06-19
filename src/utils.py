@@ -19,6 +19,10 @@ Key Features:
 - Training metrics tracking
 """
 
+# Set matplotlib backend to non-interactive to avoid tkinter threading issues
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+
 import yaml
 import torch
 import numpy as np

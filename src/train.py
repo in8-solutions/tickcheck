@@ -18,6 +18,10 @@ Key Features:
 - Support for quick testing mode
 """
 
+# Set matplotlib backend to non-interactive to avoid tkinter threading issues
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+
 import os
 import math
 import torch
@@ -45,18 +49,6 @@ from dataset import DetectionDataset, get_transform
 from model import create_model
 from transforms import get_transform
 from dataset import MultiChunkDataset
-
-def print_gpu_memory():
-    """Print current GPU memory usage if significant memory is being used.
-    
-    This function helps monitor GPU memory consumption during training,
-    printing both allocated and cached memory in megabytes.
-    """
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / 1024**2
-        cached = torch.cuda.memory_reserved() / 1024**2
-        if allocated > 1000:  # Only print if using significant memory
-            print(f"GPU memory: {allocated:.0f}MB allocated, {cached:.0f}MB cached")
 
 def train_one_epoch(model, optimizer, data_loader, device, scaler=None):
     """Train the model for one epoch with performance monitoring."""
@@ -553,76 +545,6 @@ def plot_training_curves(history, output_dir):
             'best_val_loss': min(history['val_loss']),
             'best_epoch': history['val_loss'].index(min(history['val_loss'])) + 1
         }, f, indent=4)
-
-def load_chunk_data(chunk_dir: str, val_ratio: float = 0.2, random_seed: int = 42) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
-    """
-    Load and split data from a chunk directory into training and validation sets.
-    
-    Args:
-        chunk_dir: Path to chunk directory containing images and annotations.json
-        val_ratio: Ratio of images to use for validation
-        random_seed: Random seed for reproducibility
-        
-    Returns:
-        Tuple of (train_images, val_images, train_anns, val_anns)
-    """
-    # Set random seed
-    random.seed(random_seed)
-    
-    # Load annotations
-    with open(os.path.join(chunk_dir, 'annotations.json'), 'r') as f:
-        coco_data = json.load(f)
-    
-    # Create image_id to annotations mapping
-    image_to_anns = {}
-    for ann in coco_data['annotations']:
-        img_id = ann['image_id']
-        if img_id not in image_to_anns:
-            image_to_anns[img_id] = []
-        image_to_anns[img_id].append(ann)
-    
-    # Calculate number of validation images
-    num_images = len(coco_data['images'])
-    num_val = int(num_images * val_ratio)
-    
-    # Randomly select validation images
-    val_indices = set(random.sample(range(num_images), num_val))
-    
-    # Split images and annotations
-    train_images = []
-    val_images = []
-    train_anns = []
-    val_anns = []
-    
-    for i, img in enumerate(coco_data['images']):
-        if i in val_indices:
-            val_images.append(img)
-            if img['id'] in image_to_anns:
-                val_anns.extend(image_to_anns[img['id']])
-        else:
-            train_images.append(img)
-            if img['id'] in image_to_anns:
-                train_anns.extend(image_to_anns[img['id']])
-    
-    return train_images, val_images, train_anns, val_anns
-
-def get_chunk_dirs(data_dir: str = "data") -> List[str]:
-    """
-    Get list of chunk directories in the data directory.
-    
-    Args:
-        data_dir: Base data directory
-        
-    Returns:
-        List of chunk directory paths
-    """
-    chunk_dirs = []
-    for item in os.listdir(data_dir):
-        if item.startswith('chunk_'):
-            chunk_path = os.path.join(data_dir, item)
-            if os.path.isdir(chunk_path):
-                chunk_dirs.append(chunk_path)
-    return sorted(chunk_dirs)
 
 def main():
     parser = argparse.ArgumentParser(description='Train tick detection model')
