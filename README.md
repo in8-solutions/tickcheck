@@ -21,8 +21,11 @@ sudo apt-get install -y python3-tk  # Required for GUI tools
 
 2. Create and activate a virtual environment:
 ```bash
+# First time setup only - create the virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Every time you work on the project - activate the virtual environment
+source venv/bin/activate
 ```
 
 3. Install Python dependencies:
