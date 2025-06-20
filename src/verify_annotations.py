@@ -202,7 +202,23 @@ class AnnotationViewer:
         x = event.x / self.scale
         y = event.y / self.scale
         
-        # Start drawing a new box
+        # Check if click is on an existing bounding box
+        img_info = self.images[self.current_image_idx]
+        if img_info['id'] in self.image_to_annotations:
+            for i, ann in enumerate(self.image_to_annotations[img_info['id']]):
+                bbox = ann['bbox']
+                x1, y1 = bbox[0], bbox[1]
+                x2, y2 = bbox[0] + bbox[2], bbox[1] + bbox[3]
+                
+                if x1 <= x <= x2 and y1 <= y <= y2:
+                    # Click is on this box - select it
+                    self.selected_box = i
+                    self.drawing_new = False
+                    self.new_box_start = None
+                    self.load_current_image()  # Redraw to show selection
+                    return
+        
+        # Click is not on any existing box - start drawing a new box
         self.drawing_new = True
         self.new_box_start = (x, y)
         self.selected_box = None
