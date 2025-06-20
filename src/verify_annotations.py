@@ -373,7 +373,8 @@ class AnnotationViewer:
         
         # Draw annotations
         if img_info['id'] in self.image_to_annotations:
-            for i, ann in enumerate(self.image_to_annotations[img_info['id']]):
+            boxes = self.image_to_annotations[img_info['id']]
+            for i, ann in enumerate(boxes):
                 bbox = ann['bbox']
                 x1, y1 = bbox[0] * self.scale, bbox[1] * self.scale
                 x2, y2 = (bbox[0] + bbox[2]) * self.scale, (bbox[1] + bbox[3]) * self.scale
@@ -381,6 +382,12 @@ class AnnotationViewer:
                 # Draw box
                 color = 'red' if i == self.selected_box else 'green'
                 self.canvas.create_rectangle(x1, y1, x2, y2, outline=color, width=2)
+            
+            # Auto-select if there's only one box
+            if len(boxes) == 1 and self.selected_box is None:
+                self.selected_box = 0
+                # Redraw to show the selection
+                self.load_current_image()
         
         # Update info label
         self.info_label.config(
