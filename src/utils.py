@@ -19,6 +19,10 @@ Key Features:
 - Training metrics tracking
 """
 
+# Set matplotlib backend to non-interactive to avoid tkinter threading issues
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+
 import yaml
 import torch
 import numpy as np
@@ -56,9 +60,6 @@ def create_directories(config):
     # Create output directories
     os.makedirs(config['output']['checkpoint_dir'], exist_ok=True)
     os.makedirs(config['output']['output_dir'], exist_ok=True)
-    
-    # Create temp directory for annotations
-    os.makedirs('temp_annotations', exist_ok=True)
 
 def collate_fn(batch):
     """Custom collate function for object detection data loading.
