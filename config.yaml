@@ -19,12 +19,16 @@ data:
     - "data/chunk_003/images"
     - "data/chunk_004/images"
     - "data/chunk_005/images"
+    - "data/chunk_006/images"
+    - "data/chunk_007/images"
   train_annotations:  # Updated to use multiple annotation files
     - "data/chunk_001/annotations.json"
     - "data/chunk_002/annotations.json"
     - "data/chunk_003/annotations.json"
     - "data/chunk_004/annotations.json"
     - "data/chunk_005/annotations.json"
+    - "data/chunk_006/annotations.json"
+    - "data/chunk_007/annotations.json"
   val_split: 0.2
   input_size: [1024, 1024]  # Reduced from 800x800
   mean: [0.6267567782543599, 0.5714833621501922, 0.5203172379808501]  # Computed from dataset

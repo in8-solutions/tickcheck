@@ -51,10 +51,23 @@ class AnnotationViewer:
         chunk_dir = self.chunk_dirs[chunk_idx]
         self.current_chunk = os.path.basename(chunk_dir)
         
-        # Load annotations
+        # Load annotations with error handling
         annotations_file = os.path.join(chunk_dir, "annotations.json")
-        with open(annotations_file, 'r') as f:
-            self.annotations = json.load(f)
+        try:
+            with open(annotations_file, 'r') as f:
+                self.annotations = json.load(f)
+        except FileNotFoundError:
+            messagebox.showerror("File Error", f"Could not find annotations file: {annotations_file}")
+            return
+        except json.JSONDecodeError as e:
+            messagebox.showerror("File Error", f"Invalid JSON in annotations file: {e}")
+            return
+        except PermissionError:
+            messagebox.showerror("Permission Error", f"Cannot read annotations file: {annotations_file}")
+            return
+        except Exception as e:
+            messagebox.showerror("Error", f"Unexpected error loading annotations: {e}")
+            return
         
         # Track the next available annotation ID
         self.next_annotation_id = max([ann['id'] for ann in self.annotations['annotations']], default=0) + 1
@@ -128,6 +141,7 @@ class AnnotationViewer:
         ttk.Button(bottom_control, text="Previous", command=self.prev_image).pack(side=tk.LEFT)
         ttk.Button(bottom_control, text="Next", command=self.next_image).pack(side=tk.LEFT)
         ttk.Button(bottom_control, text="Delete Box", command=self.delete_selected_box).pack(side=tk.LEFT)
+        ttk.Button(bottom_control, text="Delete All Boxes", command=self.delete_all_boxes).pack(side=tk.LEFT)
         ttk.Button(bottom_control, text="Save Changes", command=self.save_changes).pack(side=tk.RIGHT)
         
         # Image counter and info
@@ -281,8 +295,25 @@ class AnnotationViewer:
             self.new_box_start = None
     
     def add_new_box(self, x, y, width, height):
-        """Add a new bounding box annotation."""
+        """Add a new bounding box annotation with validation."""
+        # Validate coordinates
+        if x < 0 or y < 0 or width <= 0 or height <= 0:
+            messagebox.showerror("Invalid Box", "Box coordinates must be positive")
+            return
+        
+        # Check minimum size (10x10 pixels)
+        if width < 10 or height < 10:
+            messagebox.showerror("Box Too Small", "Box must be at least 10x10 pixels")
+            return
+        
+        # Check if box is within image bounds
         img_info = self.images[self.current_image_idx]
+        img_width = img_info['width']
+        img_height = img_info['height']
+        
+        if x + width > img_width or y + height > img_height:
+            messagebox.showerror("Box Out of Bounds", "Box extends beyond image boundaries")
+            return
         
         # Create new annotation
         new_ann = {
@@ -321,16 +352,40 @@ class AnnotationViewer:
             self.selected_box = None
             self.load_current_image()
     
+    def delete_all_boxes(self):
+        """Delete all bounding boxes for the current image."""
+        img_info = self.images[self.current_image_idx]
+        if img_info['id'] in self.image_to_annotations:
+            boxes = self.image_to_annotations[img_info['id']]
+            if len(boxes) > 0:
+                # Remove all annotations for this image
+                for ann in boxes:
+                    self.annotations['annotations'].remove(ann)
+                
+                # Clear the image mapping
+                self.image_to_annotations[img_info['id']] = []
+                
+                # Clear selection
+                self.selected_box = None
+                
+                # Update display
+                self.load_current_image()
+    
     def save_changes(self):
         """Save changes to the current chunk's annotation file."""
         chunk_dir = self.chunk_dirs[self.current_chunk_idx]
         annotations_file = os.path.join(chunk_dir, "annotations.json")
         
-        with open(annotations_file, 'w') as f:
-            json.dump(self.annotations, f, indent=2)
-        
-        messagebox.showinfo("Save Successful", 
-                          f"Changes saved to {self.current_chunk}/annotations.json")
+        try:
+            with open(annotations_file, 'w') as f:
+                json.dump(self.annotations, f, indent=2)
+            
+            messagebox.showinfo("Save Successful", 
+                              f"Changes saved to {self.current_chunk}/annotations.json")
+        except PermissionError:
+            messagebox.showerror("Permission Error", f"Cannot write to annotations file: {annotations_file}")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to save changes: {e}")
     
     def load_current_image(self):
         """Load and display the current image with its annotations."""
@@ -386,13 +441,38 @@ class AnnotationViewer:
             # Auto-select if there's only one box
             if len(boxes) == 1 and self.selected_box is None:
                 self.selected_box = 0
-                # Redraw to show the selection
-                self.load_current_image()
+                # Redraw just the boxes to show selection (no recursive call)
+                self.redraw_boxes()
         
         # Update info label
+        box_count = len(self.image_to_annotations.get(img_info['id'], []))
         self.info_label.config(
-            text=f"Image {self.current_image_idx + 1}/{len(self.images)} - {self.current_chunk}"
+            text=f"Image {self.current_image_idx + 1}/{len(self.images)} - {self.current_chunk} - Boxes: {box_count}"
         )
+    
+    def redraw_boxes(self):
+        """Redraw just the bounding boxes without reloading the entire image."""
+        if not self.images:
+            return
+            
+        img_info = self.images[self.current_image_idx]
+        
+        # Clear existing boxes (but keep the image)
+        for item in self.canvas.find_all():
+            if self.canvas.type(item) == "rectangle":
+                self.canvas.delete(item)
+        
+        # Redraw boxes with current selection
+        if img_info['id'] in self.image_to_annotations:
+            boxes = self.image_to_annotations[img_info['id']]
+            for i, ann in enumerate(boxes):
+                bbox = ann['bbox']
+                x1, y1 = bbox[0] * self.scale, bbox[1] * self.scale
+                x2, y2 = (bbox[0] + bbox[2]) * self.scale, (bbox[1] + bbox[3]) * self.scale
+                
+                # Draw box
+                color = 'red' if i == self.selected_box else 'green'
+                self.canvas.create_rectangle(x1, y1, x2, y2, outline=color, width=2)
     
     def prev_image(self):
         """Go to previous image."""
