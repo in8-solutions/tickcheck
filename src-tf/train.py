@@ -245,19 +245,11 @@ def main():
         print("Creating model...")
         model = create_model(config)
         
-        # Create optimizer - use legacy optimizer for Mac to avoid slow performance
-        if config['training']['device'].lower() in ['mps', 'cpu']:
-            # Use legacy optimizer for Mac
-            optimizer = tf.keras.optimizers.legacy.Adam(
-                learning_rate=config['training']['learning_rate'],
-                decay=config['training']['weight_decay']
-            )
-        else:
-            # Use regular optimizer for CUDA
-            optimizer = tf.keras.optimizers.Adam(
-                learning_rate=config['training']['learning_rate'],
-                weight_decay=config['training']['weight_decay']
-            )
+        # Create optimizer - use new Keras 3 API
+        optimizer = tf.keras.optimizers.Adam(
+            learning_rate=config['training']['learning_rate'],
+            weight_decay=config['training']['weight_decay']
+        )
         
         # Learning rate scheduler
         lr_scheduler = tf.keras.callbacks.ReduceLROnPlateau(

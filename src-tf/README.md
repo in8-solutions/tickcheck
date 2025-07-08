@@ -1,6 +1,8 @@
-# TensorFlow Tick Detection Model
+# TensorFlow Tick Detection Model (Independent Tooling)
 
-This directory contains a TensorFlow/Keras implementation of the tick detection system, designed to be compatible with TensorFlow Lite for mobile deployment.
+This directory contains a **standalone TensorFlow/Keras implementation** of the tick detection system, designed to be compatible with TensorFlow Lite for mobile deployment.
+
+**Note**: This is an independent tooling directory for exploring TFLite options while the main model training/analysis happens in the top-level `src/` directory with PyTorch/CUDA.
 
 ## Overview
 
@@ -33,6 +35,10 @@ src-tf/
 ├── model.py                 # RetinaNet model implementation
 ├── train.py                 # Training script
 ├── evaluate_model.py        # Model evaluation script
+├── convert_to_tflite.py     # TFLite conversion script
+├── tflite_workflow.py       # Complete TFLite workflow pipeline
+├── mobile_inference.py      # Mobile inference reference script
+├── test_mac_setup.py        # Mac MPS validation script
 └── README.md               # This file
 ```
 
@@ -84,6 +90,7 @@ python evaluate_model.py \
 
 ### TensorFlow Lite Conversion
 
+#### Option 1: Manual Conversion
 To convert the trained model to TensorFlow Lite:
 
 ```python
@@ -105,6 +112,30 @@ tflite_model = converter.convert()
 # Save the TFLite model
 with open('tick_detector.tflite', 'wb') as f:
     f.write(tflite_model)
+```
+
+#### Option 2: Automated Workflow (Recommended)
+Use the comprehensive TFLite workflow script:
+
+```bash
+# Check prerequisites
+python tflite_workflow.py
+
+# Convert trained model to TFLite
+python tflite_workflow.py --convert model.h5
+
+# Test TFLite model
+python tflite_workflow.py --test tick_detector.tflite
+
+# Create mobile inference reference
+python tflite_workflow.py --create-mobile-script
+```
+
+#### Mobile Inference Reference
+The `mobile_inference.py` script provides a reference implementation for using the TFLite model:
+
+```bash
+python mobile_inference.py <image_path>
 ```
 
 ## Key Features
