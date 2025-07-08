@@ -94,7 +94,7 @@ def test_model_creation():
                     'anchor_ratios': [0.7, 1.0, 1.3]
                 },
                 'data': {
-                    'input_size': [512, 512]  # Smaller for testing
+                    'input_size': [1024, 1024]  # Match model expectations
                 },
                 'training': {
                     'learning_rate': 0.0001,
@@ -109,7 +109,7 @@ def test_model_creation():
         print(f"✓ Model created successfully")
         
         # Build the model before counting parameters
-        test_input = tf.random.normal([1, 512, 512, 3])
+        test_input = tf.random.normal([1, 1024, 1024, 3])
         _ = model(test_input, training=False)  # This builds the model
         print(f"  Total parameters: {model.count_params():,}")
         
