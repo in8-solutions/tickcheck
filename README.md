@@ -194,7 +194,7 @@ The repository contains annotation files and empty image directories. The actual
 
 ### Setting up images locally:
 
-1. Download the images from Google Drive: [https://drive.google.com/drive/folders/1rfOLcwgnosodbiRYgvbG8Y67W8C8idF4?usp=drive_link](https://drive.google.com/drive/folders/1rfOLcwgnosodbiRYgvbG8Y67W8C8idF4?usp=drive_link)
+1. The training images are kept separate from the repo for the time being; although we intend to share this project, we aren't yet samrt enough to know if/how we should limit use of the actual model.   
 2. The images are organized in chunks (chunk_001 through chunk_015)
 3. Copy the images from the downloaded folder into the corresponding `data/chunk_XXX/images/` directories
    - For example, copy images from `downloaded/chunk_001/images/*` to `data/chunk_001/images/`
