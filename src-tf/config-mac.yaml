@@ -1,0 +1,114 @@
+model:
+  name: "retinanet"
+  backbone: "resnet50"
+  num_classes: 2  # Background (0) and tick (1)
+  pretrained: true
+  freeze_backbone: false
+  min_size: 1024  # Minimum size for image resizing
+  max_size: 1024  # Maximum size for image resizing
+  box_score_thresh: 0.5
+  box_nms_thresh: 0.3
+  box_detections_per_img: 100
+  anchor_sizes: [16, 32, 64, 128, 256]
+  anchor_ratios: [0.7, 1.0, 1.3]
+
+data:
+  train_paths:
+    - "../data/chunk_001/images"
+    - "../data/chunk_002/images"
+    - "../data/chunk_003/images"
+    - "../data/chunk_004/images"
+    - "../data/chunk_005/images"
+    - "../data/chunk_006/images"
+    - "../data/chunk_007/images"
+  train_annotations:
+    - "../data/chunk_001/annotations.json"
+    - "../data/chunk_002/annotations.json"
+    - "../data/chunk_003/annotations.json"
+    - "../data/chunk_004/annotations.json"
+    - "../data/chunk_005/annotations.json"
+    - "../data/chunk_006/annotations.json"
+    - "../data/chunk_007/annotations.json"
+  val_split: 0.2
+  input_size: [1024, 1024]
+  mean: [0.6267567782543599, 0.5714833621501922, 0.5203172379808501]
+  std: [0.15882498020157218, 0.16065719380769877, 0.1602449702085927]
+  categories:
+    - id: 0
+      name: "background"
+    - id: 1
+      name: "tick"
+
+training:
+  # Mac M2 optimized settings
+  device: "mps"  # Use Metal Performance Shaders for M2
+  num_epochs: 50          # Reduced for testing
+  batch_size: 2           # Reduced for M2 memory constraints (was 4 for M3)
+  learning_rate: 0.0001
+  weight_decay: 0.001
+  
+  # Early stopping parameters
+  min_epochs: 10          # Reduced for testing
+  early_stopping_patience: 5
+  
+  # Learning rate scheduling
+  lr_scheduler:
+    name: "reduce_on_plateau"
+    factor: 0.2
+    patience: 5
+    min_lr: 0.00001
+  
+  # Data loading - optimized for Mac
+  num_workers: 2          # Reduced for Mac
+  pin_memory: false       # Not needed on Mac
+  prefetch_factor: 2
+  persistent_workers: false
+  
+  # Mixed precision training - works well on M2
+  use_amp: true
+  channels_last: true
+  
+  # Mac-specific optimizations
+  allow_tf32: false       # Not available on Mac
+  mps_memory_growth: true # Enable memory growth for MPS
+
+output:
+  checkpoint_dir: "outputs/training/checkpoints"
+  output_dir: "outputs"
+  training_curves: "outputs/training/curves"
+  evaluation_dir: "outputs/evaluation"
+
+augmentation:
+  train:
+    horizontal_flip: true
+    vertical_flip: true
+    rotate:
+      enabled: true
+      limit: 45
+    scale:
+      enabled: true
+      min: 0.8
+      max: 1.2
+    brightness:
+      enabled: true
+      limit: 0.2
+    contrast:
+      enabled: true
+      limit: 0.2
+    blur:
+      enabled: true
+      limit: 3
+    noise:
+      enabled: true
+      limit: 0.05
+  
+  val:
+    resize_only: true
+
+classes:
+  0: "background"
+  1: "tick"
+
+paths:
+  checkpoint_dir: "checkpoints"
+  output_dir: "outputs" 
