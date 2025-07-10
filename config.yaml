@@ -1,16 +1,16 @@
 model:
-  name: "retinanet"
-  backbone: "resnet50"
+  name: "mobilenet_detection"
+  backbone: "mobilenet_v3_small"
   num_classes: 2  # Background (0) and tick (1)
   pretrained: true
-  freeze_backbone: false  # Added parameter - don't freeze since we're doing a long training
-  min_size: 1024  # Minimum size for image resizing
-  max_size: 1024  # Maximum size for image resizing
-  box_score_thresh: 0.5    # Increased from 0.3 to be more selective
-  box_nms_thresh: 0.3      # Reduced from 0.5 to be more aggressive with NMS
-  box_detections_per_img: 100  # Maximum number of detections per image
-  anchor_sizes: [16, 32, 64, 128, 256]  # Anchor sizes for different feature levels
-  anchor_ratios: [0.7, 1.0, 1.3]  # Anchor aspect ratios
+  freeze_backbone: false  # Don't freeze since we're doing training
+  min_size: 512  # Reduced for mobile efficiency
+  max_size: 512  # Reduced for mobile efficiency
+  box_score_thresh: 0.5
+  box_nms_thresh: 0.3
+  box_detections_per_img: 50  # Reduced for mobile efficiency
+  anchor_sizes: [16, 32, 64, 128]  # Simplified anchor sizes
+  anchor_ratios: [0.5, 1.0, 2.0]  # Standard anchor ratios
 
 data:
   train_paths:  # Updated to use multiple chunks
@@ -30,7 +30,7 @@ data:
     - "data/chunk_006/annotations.json"
     - "data/chunk_007/annotations.json"
   val_split: 0.2
-  input_size: [1024, 1024]  # Reduced from 800x800
+  input_size: [512, 512]  # Reduced for mobile efficiency
   mean: [0.6267567782543599, 0.5714833621501922, 0.5203172379808501]  # Computed from dataset
   std: [0.15882498020157218, 0.16065719380769877, 0.1602449702085927]  # Computed from dataset
   categories:  # Updated to be consistent with num_classes

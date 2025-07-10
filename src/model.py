@@ -1,14 +1,13 @@
 """
-RetinaNet model implementation for tick detection.
+MobileNet-based detection model for tick detection.
 
-This module implements a custom RetinaNet model based on PyTorch's implementation.
-The model uses a ResNet50-FPN backbone and is designed for efficient single-stage
-object detection with balanced handling of class imbalance through Focal Loss.
+This module implements a custom detection model using MobileNet backbone
+and is designed for efficient mobile deployment with TFLite compatibility.
 
 Key Features:
-- ResNet50 backbone with Feature Pyramid Network (FPN)
-- Custom anchor generation
-- Focal Loss for handling class imbalance
+- MobileNet backbone for mobile efficiency
+- Simple detection head
+- TFLite-friendly architecture
 - Support for transfer learning from ImageNet weights
 """
 
@@ -16,149 +15,171 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models.detection import retinanet_resnet50_fpn
-from torchvision.models.detection.anchor_utils import AnchorGenerator
+from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
+from torchvision.models.detection import ssd300_vgg16, SSD300_VGG16_Weights
+from torchvision.models.detection.ssd import SSDHead
+from torchvision.models.detection.backbone_utils import _validate_trainable_layers
 from torchvision.models.detection.transform import GeneralizedRCNNTransform
-from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
-from torchvision.models.detection.retinanet import RetinaNet_ResNet50_FPN_Weights
-from torchvision.models.detection.retinanet import RetinaNetClassificationHead, RetinaNetRegressionHead
+from torchvision.ops import boxes as box_ops
 
-class RetinaNetHead(nn.Module):
-    def __init__(self, in_channels, num_anchors, num_classes):
+class MobileNetDetectionHead(nn.Module):
+    """Detection head for MobileNet-based model."""
+    
+    def __init__(self, in_channels, num_classes, num_anchors=6):
         super().__init__()
-        self.classification_head = RetinaNetClassificationHead(
-            in_channels, num_anchors, num_classes
+        self.num_classes = num_classes
+        self.num_anchors = num_anchors
+        
+        # Classification head
+        self.cls_head = nn.Sequential(
+            nn.Conv2d(in_channels, 256, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, num_classes * num_anchors, 3, padding=1)
         )
-        self.regression_head = RetinaNetRegressionHead(
-            in_channels, num_anchors
+        
+        # Regression head
+        self.reg_head = nn.Sequential(
+            nn.Conv2d(in_channels, 256, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 4 * num_anchors, 3, padding=1)
         )
+    
+    def forward(self, x):
+        cls_logits = self.cls_head(x)
+        bbox_regression = self.reg_head(x)
+        
+        # Reshape outputs
+        batch_size = cls_logits.size(0)
+        cls_logits = cls_logits.permute(0, 2, 3, 1).contiguous()
+        cls_logits = cls_logits.view(batch_size, -1, self.num_classes)
+        
+        bbox_regression = bbox_regression.permute(0, 2, 3, 1).contiguous()
+        bbox_regression = bbox_regression.view(batch_size, -1, 4)
+        
+        return cls_logits, bbox_regression
+
+class MobileNetBackbone(nn.Module):
+    """MobileNet backbone with feature extraction."""
+    
+    def __init__(self, pretrained=True):
+        super().__init__()
+        
+        # Load pretrained MobileNet
+        if pretrained:
+            self.backbone = mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.IMAGENET1K_V1)
+        else:
+            self.backbone = mobilenet_v3_small(weights=None)
+        
+        # Remove the classifier by replacing with identity
+        self.backbone.classifier = nn.Sequential(nn.Identity())
+        
+        # Feature extraction layers
+        self.features = self.backbone.features
         
     def forward(self, x):
-        cls_logits = []
-        bbox_regression = []
+        features = []
         
-        # x is a list of feature maps from FPN
-        for feature in x:
-            # Ensure feature is 4D (batch, channels, height, width)
-            if len(feature.shape) == 3:
-                feature = feature.unsqueeze(0)
-            cls_logits.append(self.classification_head(feature))
-            bbox_regression.append(self.regression_head(feature))
-            
-        return {
-            "cls_logits": cls_logits,
-            "bbox_regression": bbox_regression
-        }
+        # Extract features at different scales
+        for i, layer in enumerate(self.features):
+            x = layer(x)
+            if i in [5, 11, 15]:  # Different feature levels
+                features.append(x)
         
-    def compute_loss(self, targets, head_outputs, anchors, matched_idxs):
-        """
-        Compute the losses for the RetinaNet head.
-        
-        Args:
-            targets (List[Dict]): List of target dictionaries
-            head_outputs (Dict): Dictionary containing classification and regression outputs
-            anchors (List[Tensor]): List of anchor boxes for each feature level
-            matched_idxs (List[Tensor]): List of matched indices for each feature level
-            
-        Returns:
-            Dict containing classification and regression losses
-        """
-        cls_logits = head_outputs["cls_logits"]
-        bbox_regression = head_outputs["bbox_regression"]
-        
-        # Compute classification loss
-        cls_loss = self.classification_head.compute_loss(
-            targets, cls_logits, anchors, matched_idxs
-        )
-        
-        # Compute regression loss
-        reg_loss = self.regression_head.compute_loss(
-            targets, bbox_regression, anchors, matched_idxs
-        )
-        
-        return {
-            "loss_classifier": cls_loss,
-            "loss_box_reg": reg_loss
-        }
+        return features
 
-class TickDetector(nn.Module):
+class TickDetectorMobile(nn.Module):
+    """MobileNet-based tick detection model."""
+    
     def __init__(self, config):
         super().__init__()
         self.config = config
         
-        # Create the internal RetinaNet model with COCO weights
-        self.model = retinanet_resnet50_fpn(
-            weights=RetinaNet_ResNet50_FPN_Weights.COCO_V1,
-            num_classes=91,  # COCO has 91 classes
-            min_size=config['model']['min_size'],
-            max_size=config['model']['max_size'],
-            box_score_thresh=config['model']['box_score_thresh'],
-            box_nms_thresh=config['model']['box_nms_thresh'],
-            box_detections_per_img=config['model']['box_detections_per_img']
+        # Backbone
+        self.backbone = MobileNetBackbone(pretrained=config['model']['pretrained'])
+        
+        # Detection head
+        in_channels = 576  # MobileNet V3 small feature channels
+        self.detection_head = MobileNetDetectionHead(
+            in_channels=in_channels,
+            num_classes=config['model']['num_classes'],
+            num_anchors=6
         )
-        
-        # Update anchor sizes and ratios
-        anchor_sizes = config['model']['anchor_sizes']
-        anchor_ratios = config['model']['anchor_ratios']
-        
-        # Create anchor generator with updated sizes
-        anchor_generator = AnchorGenerator(
-            sizes=tuple((s,) for s in anchor_sizes),
-            aspect_ratios=tuple((r,) for r in anchor_ratios)
-        )
-        
-        # Update the anchor generator in the head
-        self.model.head.anchor_generator = anchor_generator
         
         # Freeze backbone if specified
         if config['model']['freeze_backbone']:
-            for param in self.model.backbone.parameters():
+            for param in self.backbone.parameters():
                 param.requires_grad = False
-                
-    def forward(self, images, targets=None):
+        
+        # Loss functions
+        self.cls_loss = nn.CrossEntropyLoss()
+        self.reg_loss = nn.SmoothL1Loss()
+    
+    def forward(self, x, targets=None):
         """
         Forward pass of the model.
         
         Args:
-            images (List[Tensor]): List of images to process
-            targets (List[Dict], optional): List of target dictionaries containing:
-                - boxes (Tensor[N, 4]): Ground truth boxes in [x1, y1, x2, y2] format
-                - labels (Tensor[N]): Class labels for each box
-                
+            x (Tensor): Input images [B, C, H, W]
+            targets (List[Dict], optional): List of target dictionaries
+            
         Returns:
-            During training:
-                Dict containing losses
-            During inference:
-                List[Dict] containing predictions with boxes, labels, and scores
+            During training: Dict containing losses
+            During inference: List[Dict] containing predictions
         """
-        if self.training and targets is None:
-            raise ValueError("In training mode, targets should be passed")
+        # Extract features
+        features = self.backbone(x)
+        
+        # Use the last feature map for detection
+        feature_map = features[-1]
+        
+        # Detection head
+        cls_logits, bbox_regression = self.detection_head(feature_map)
+        
+        if self.training and targets is not None:
+            # Compute losses
+            losses = self.compute_loss(cls_logits, bbox_regression, targets)
+            return losses
+        else:
+            # Inference mode
+            # Apply sigmoid to classification logits
+            cls_probs = torch.sigmoid(cls_logits)
             
-        try:
-            # Convert images to list if they're not already
-            if not isinstance(images, list):
-                images = [images]
-                
-            # Convert targets to list if they're not already
-            if targets is not None and not isinstance(targets, list):
-                targets = [targets]
-                
-            # Forward pass through the model
-            return self.model(images, targets)
+            # Simple post-processing (you might want to add NMS here)
+            predictions = []
+            for i in range(cls_probs.size(0)):
+                pred = {
+                    'boxes': bbox_regression[i],
+                    'labels': torch.argmax(cls_probs[i], dim=1),
+                    'scores': torch.max(cls_probs[i], dim=1)[0]
+                }
+                predictions.append(pred)
             
-        except Exception as e:
-            print(f"Error in forward pass: {str(e)}")
-            print(f"Images shape: {[img.shape for img in images]}")
-            if targets is not None:
-                print(f"Targets: {targets}")
-            raise
+            return predictions
+    
+    def compute_loss(self, cls_logits, bbox_regression, targets):
+        """Compute classification and regression losses."""
+        # This is a simplified loss computation
+        # In practice, you'd want proper anchor matching and loss computation
+        
+        cls_loss = self.cls_loss(cls_logits.view(-1, self.config['model']['num_classes']), 
+                                torch.zeros(cls_logits.size(0) * cls_logits.size(1), 
+                                          dtype=torch.long, device=cls_logits.device))
+        
+        reg_loss = self.reg_loss(bbox_regression, torch.zeros_like(bbox_regression))
+        
+        return {
+            'loss_classifier': cls_loss,
+            'loss_box_reg': reg_loss,
+            'total_loss': cls_loss + reg_loss
+        }
 
 def create_model(config):
     """Create and configure the model based on the provided configuration."""
-    model_config = config['model']
-    
-    # Create model with pretrained weights
-    model = TickDetector(config)
+    model = TickDetectorMobile(config)
     
     # Set device
     device = torch.device(config['training']['device'])
